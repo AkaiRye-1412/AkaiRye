@@ -1,0 +1,31 @@
+[project]
+name = "akairye-workbench"
+version = "0.1.0"
+description = "AkaiRye 售后工作台 - 本地后台服务（FastAPI + SQLite）"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "watchdog>=4.0",          # vault 文件监听（FR-NOTE-06）
+    "openai>=1.40",           # LLM / Embedding 统一接入（OpenAI 兼容协议）
+    "sqlalchemy>=2.0",        # 数据访问层（SQLite）
+]
+
+[project.optional-dependencies]
+# 向量检索扩展：sqlite-vec（V1 spike 验证项，见 02 文档 9.2 / 07 风险 R1）
+vec = ["sqlite-vec>=0.1.6"]
+# 终端 PTY：三期引入（FR-TERM）
+pty = ["pywinpty>=2.0"]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

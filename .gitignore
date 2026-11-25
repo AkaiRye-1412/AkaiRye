@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+
+# 运行时数据（勿提交）
+data/workbench.db*
+data/backups/
+data/logs/
+
+# 环境
+.env
