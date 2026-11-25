@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>售后工作台 · 交互原型</title>
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/pages.css?v=kb3" />
+  <link rel="stylesheet" href="css/views.css" />
+  <link rel="stylesheet" href="css/pdf.css" />
+  <link rel="stylesheet" href="css/allnotes.css" />
+  <link rel="stylesheet" href="css/rag.css?v=kb3" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232a78d6'/><text x='50' y='68' font-size='54' text-anchor='middle' fill='white' font-family='sans-serif'>售</text></svg>" />
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="profile-card" id="profileCard">
+        <div class="profile-head">
+          <span class="profile-title">个人信息</span>
+          <span class="profile-status"><span class="dot ok"></span>本机</span>
+        </div>
+        <div class="profile-body">
+          <div class="profile-avatar">
+            <img src="assets/avatar.jpg" alt="个人头像" />
+          </div>
+          <div class="profile-detail">
+            <div class="profile-name-line">
+              <strong>AkaiRye</strong>
+              <span>售后工作台 · 本地</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-foot">
+        <div class="vault-card">
+          <div class="vault-card-top"><span id="vaultIcon"></span><span>Obsidian Vault</span><em>监听中</em></div>
+          <div class="vault-path">D:\Obsidian\售后库</div>
+          <div class="vault-meta"><span class="dot ok"></span>已索引 48 篇 · 刚刚同步</div>
+        </div>
+        <div class="side-links">
+          <button class="side-link" id="btnPrivacy">数据外传说明</button>
+          <button class="side-link" id="btnShortcuts">快捷键</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="shell">
+      <header class="topbar">
+        <div class="topbar-title">
+          <span class="crumb" id="crumb">工作台</span>
+          <span class="page-name" id="pageName">首页</span>
+        </div>
+        <div class="ask-box" id="askBox">
+          <span class="ask-icon" id="askIcon"></span>
+          <input id="globalAsk" type="text" autocomplete="off"
+                 placeholder="提问或搜索历史处理记录…" aria-label="全局提问" />
+          <span class="ask-hint"><kbd>Ctrl</kbd><kbd>K</kbd></span>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn ghost" id="btnTerminalQuick"><span id="icTerm"></span><span class="btn-label">终端</span></button>
+          <button class="btn primary" id="btnNewNote"><span id="icPlus"></span><span class="btn-label">新建笔记</span></button>
+        </div>
+      </header>
+
+      <div class="workspace" id="workspace">
+        <main class="main" id="main">
+          <div class="view" id="view"></div>
+        </main>
+
+        <aside class="rag-panel" id="ragPanel" aria-label="知识助手">
+          <div class="rag-resizer" id="ragResizer" title="拖拽调整宽度"></div>
+          <div class="rag-rail" id="ragRail" title="展开知识助手">
+            <span class="rail-icon" id="railIcon"></span>
+            <span class="rail-text">知识助手</span>
+          </div>
+          <div class="rag-inner" id="ragInner"></div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <div id="readerRoot"></div>
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root" aria-live="polite"></div>
+  <div id="menuRoot"></div>
+
+  <script src="js/icons.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/views-home.js"></script>
+  <script src="js/views-notes.js"></script>
+  <script src="js/views-kb.js?v=kb3"></script>
+  <script src="js/views-pdf.js"></script>
+  <script src="js/views-allnotes.js"></script>
+  <script src="js/views-tools.js"></script>
+  <script src="js/views-settings.js"></script>
+  <script src="js/views-cleanup.js"></script>
+  <script src="js/reader.js"></script>
+  <script src="js/rag-engine.js?v=kb3"></script>
+  <script src="js/rag.js?v=kb3"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
