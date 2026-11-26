@@ -17,6 +17,7 @@ from app.core.config import runtime
 from app.core.logging import setup_logging
 from app.db import database, migrations
 from app.services import backup as backup_service
+from app.services import rag_service
 from app.services import vault as vault_service_module
 from app.ws import events
 
@@ -35,6 +36,11 @@ async def lifespan(app: FastAPI):
         if backup_service.needs_daily_backup(conn):
             logger.info("距上次备份超过 24h，启动时补跑每日备份")
             backup_service.run_backup(conn, kind="daily")
+
+        # 旧会话标题补齐：仍是「新会话」但有历史的，用第一条提问命名（幂等）
+        renamed = rag_service.backfill_default_titles(conn)
+        if renamed:
+            logger.info("会话标题补齐：%d 个默认标题会话已按首条提问命名", renamed)
 
     # vault 文件监听（FR-NOTE-06）：目录未配置/不存在时跳过（设置页会校验提示）
     if vault_service_module.vault_service.start_watch(database.connect):

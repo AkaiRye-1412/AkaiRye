@@ -37,11 +37,13 @@ def list_projects(
 
     projects: dict[tuple, dict] = {}
     for r in rows:
-        key = (r["customer"] or "", r["project_name"])
+        # 卡片式售后记录（按日卡片，无 project 字段）：一条记录一项，展示名取正文 H1
+        is_card = r["note_mode"] == "card"
+        key = (r["customer"] or "", r["path"]) if is_card else (r["customer"] or "", r["project_name"])
         if key not in projects:
             projects[key] = {
                 "customer": r["customer"],
-                "project_name": r["project_name"],
+                "project_name": (r["note_title"] or r["project_name"]) if is_card else r["project_name"],
                 "status": r["status"],
                 "start_date": r["start_date"],
                 "updated_date": r["updated_date"],

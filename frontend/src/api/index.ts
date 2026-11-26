@@ -72,8 +72,25 @@ export const notesApi = {
     }),
   history: (path: string) =>
     http.get<Record<string, any>>(`/api/notes/${encodeURIComponent(path)}/history`),
+  /** 头部字段更新（FR-NOTE-03/11）：只改 frontmatter，正文不动；冲突语义同 save。 */
+  meta: (
+    path: string,
+    body: {
+      customer?: string
+      project_name?: string
+      status?: 'active' | 'archived'
+      start_date?: string
+      base_hash?: string | null
+      force?: boolean
+    },
+  ) => http.patch<Record<string, any>>(`/api/notes/${encodeURIComponent(path)}/meta`, body),
   reindex: (path: string) =>
     http.post<Record<string, any>>(`/api/notes/${encodeURIComponent(path)}/reindex`),
+  /** 删除笔记（FR-NOTE-12）：后端把文件移入 vault 的 .trash/，可还原。 */
+  remove: (path: string) =>
+    http.delete<{ deleted: boolean; path: string; trashed_to: string }>(
+      `/api/notes/${encodeURIComponent(path)}`,
+    ),
 }
 
 export const projectsApi = {
@@ -125,7 +142,8 @@ export const ragApi = {
   clearSessionMessages: (id: number) =>
     http.delete<{ cleared: number; session_id: number }>(`/api/rag/sessions/${id}/messages`),
   ask: (body: { session_id: number; question: string; scope: Record<string, any> }) =>
-    http.post<{ message_id: number }>('/api/rag/ask', body),
+    // title：后端首次提问时自动命名的会话标题（未改动则 null）
+    http.post<{ message_id: number; title?: string | null }>('/api/rag/ask', body),
   message: (id: number) => http.get<RagMessage>(`/api/rag/messages/${id}`),
   citations: (id: number) => http.get<RagCitation[]>(`/api/rag/citations/${id}`),
 }

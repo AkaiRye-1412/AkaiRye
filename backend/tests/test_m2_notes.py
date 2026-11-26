@@ -24,6 +24,12 @@ def client(monkeypatch):
     )
     # 预置一份缺头部字段的笔记（head_ok=0）
     (notes_dir / "无头笔记.md").write_bytes("# 只有正文\n".encode("utf-8"))
+    # 预置一份真实形态的售后卡片（v2 兼容口径：name/time/tags/description，无 project/status/start_date）
+    (notes_dir / "20260818.md").write_bytes(
+        ("---\nname: 长峰机电210\ntime: 2026-08-18-Tue 19:17\ntags:\n  - NBA2000\n  - mphase\n"
+         "description: 直线电机不同位置mphase不同\nProperty: 售后卡\n---\n\n"
+         "# mphase变化\n\n## 现象\n\n在不同位置，换相角度一直变。\n").encode("utf-8")
+    )
 
     client = TestClient(create_app())
     client.__enter__()
@@ -60,7 +66,11 @@ def test_create_note_template_and_conflict(client):
     # FR-NOTE-10：模板带固定头部 + 日期小节
     text = (notes_dir / "华瑞包装-涂布机伺服报警E-07.md").read_text(encoding="utf-8")
     assert text.startswith("---\nname: 华瑞包装\nproject: 涂布机伺服报警E-07\nstatus: 进行中\n")
-    assert "## " in text and "**现象**：" in text
+    # 正文与 vault 既有售后卡片同构：`# 标题` + 引用行 + `## 小节`（不能用 **粗体** + --- 的扁平写法）
+    assert "# 涂布机伺服报警E-07\n\n> 售后支持卡片 |\n## 现象\n" in text
+    for label in ("现象", "配置", "排查步骤", "注意：", "后续："):
+        assert f"\n## {label}\n" in text
+    assert "---\n\n..." not in text
     # 重名 409 path_conflict
     dup = c.post("/api/notes", json={"customer": "华瑞包装", "project_name": "涂布机伺服报警E-07"})
     assert dup.status_code == 409
@@ -159,3 +169,127 @@ def test_history_endpoint(client):
     (notes_dir / "星河纸业-复卷机张力控制异常.md").write_text("changed", encoding="utf-8")
     resp2 = c.get("/api/notes/星河纸业-复卷机张力控制异常.md/history")
     assert resp2.json()["externally_modified"] is True
+
+
+def test_card_note_fields(client):
+    """真实售后卡片口径（v2）：name/time/tags/description，无 project/status/start_date。
+
+    - head_ok 必须为 1（卡片只要求 name，不再判「缺头」）；
+    - 标题取正文 H1，摘要取 description，标签拆成列表，日期由文件名推断。
+    """
+    c, _ = client
+    note = {n["path"]: n for n in c.get("/api/notes").json()}["20260818.md"]
+    assert note["head_ok"] == 1
+    assert note["note_mode"] == "card"
+    assert note["customer"] == "长峰机电210"
+    assert note["note_title"] == "mphase变化"
+    assert note["summary"] == "直线电机不同位置mphase不同"
+    assert note["tags"] == "NBA2000, mphase"
+    assert note["start_date"] == "2026-08-18"
+    assert note["status"] == "active"  # 无 status 视为进行中
+
+
+def test_meta_patch_head_fields(client):
+    """FR-NOTE-03/11：改头部字段不动正文；冲突 409；非法值 400。"""
+    c, notes_dir = client
+    path = "20260818.md"
+    target = notes_dir / path
+    info = c.get(f"/api/notes/{path}").json()
+    body_before = info["content"].split("---\n", 2)[-1]
+
+    resp = c.patch(
+        f"/api/notes/{path}/meta",
+        json={"customer": "长峰机电", "status": "archived", "base_hash": info["content_hash"]},
+    )
+    assert resp.status_code == 200
+    after = target.read_text(encoding="utf-8")
+    assert "name: 长峰机电" in after
+    assert "status: 已归档" in after
+    assert "tags:\n  - NBA2000" in after  # 列表字段原样保留
+    # 正文逐字不变（头部改写不影响 body）
+    assert after.split("---\n", 2)[-1].strip() == body_before.strip()
+
+    # 头部字段缓存同步：状态与客户已更新
+    note = {n["path"]: n for n in c.get("/api/notes").json()}[path]
+    assert note["status"] == "archived" and note["customer"] == "长峰机电"
+
+    # 旧 hash → 409（禁止静默覆盖）
+    stale = c.patch(f"/api/notes/{path}/meta", json={"customer": "别人家的", "base_hash": info["content_hash"]})
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "edit_conflict"
+
+    # force=true 覆盖
+    forced = c.patch(
+        f"/api/notes/{path}/meta",
+        json={"customer": "长峰机电", "force": True, "base_hash": info["content_hash"]},
+    )
+    assert forced.status_code == 200
+
+    # 非法状态 / 空客户 → 400
+    bad = c.patch(f"/api/notes/{path}/meta", json={"status": "done"})
+    assert bad.status_code == 400
+    empty = c.patch(f"/api/notes/{path}/meta", json={"customer": "   "})
+    assert empty.status_code == 400
+
+
+def test_status_patch_adds_missing_field(client):
+    """卡片没有 status 字段时，归档自动补写该键（不要求先跑存量整理）。"""
+    c, notes_dir = client
+    assert "status:" not in (notes_dir / "20260818.md").read_text(encoding="utf-8")
+    resp = c.patch("/api/projects/20260818.md", json={"status": "archived"})
+    assert resp.status_code == 200
+    text = (notes_dir / "20260818.md").read_text(encoding="utf-8")
+    assert "status: 已归档" in text
+    assert "# mphase变化" in text  # 正文仍在
+
+    # 恢复
+    back = c.patch("/api/projects/20260818.md", json={"status": "active"})
+    assert back.status_code == 200
+    assert "status: 进行中" in (notes_dir / "20260818.md").read_text(encoding="utf-8")
+
+
+def test_apply_head_updates_preserves_layout():
+    """头部改写单元测试：缺键追加、有键替换、正文与空行习惯保持不变。"""
+    from app.services import vault
+
+    original = "---\nname: A\ntags:\n  - x\n---\n\n# 标题\n\n正文\n"
+    out = vault._apply_head_updates(original, {"status": "进行中", "name": "B"})
+    assert out.startswith("---\nname: B\ntags:\n  - x\nstatus: 进行中\n---\n\n# 标题")
+    assert out.endswith("\n\n正文\n")
+
+    no_head = "# 只有正文\n"
+    out2 = vault._apply_head_updates(no_head, {"name": "C"})
+    assert out2 == "---\nname: C\n---\n\n# 只有正文\n"
+
+
+def test_delete_note_moves_to_trash(client):
+    """FR-NOTE-12：删除 = 移入 vault 根目录 .trash/，文件可还原，缓存与索引同步清理。"""
+    c, notes_dir = client
+    assert c.get("/api/notes").status_code == 200
+
+    resp = c.delete("/api/notes/无头笔记.md")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted"] is True
+    assert body["path"] == "无头笔记.md"
+    assert body["trashed_to"].startswith(".trash/")
+
+    # 原文件消失、列表不再出现、再读 404
+    assert not (notes_dir / "无头笔记.md").exists()
+    assert "无头笔记.md" not in {n["path"] for n in c.get("/api/notes").json()}
+    assert c.get("/api/notes/无头笔记.md").status_code == 404
+
+    # 回收目录里留着同名后缀的副本（可拖回原目录还原），内容不变
+    trash = notes_dir.parent / ".trash"
+    kept = list(trash.glob("*-无头笔记.md"))
+    assert len(kept) == 1
+    assert kept[0].read_text(encoding="utf-8") == "# 只有正文\n"
+
+
+def test_delete_note_missing_and_outside(client):
+    """删除不存在 / 越界路径的语义与其它接口一致：404、400。"""
+    c, _ = client
+    assert c.delete("/api/notes/不存在.md").status_code == 404
+    # 编码后的 ../ 才能到达路由（httpx 会先归一化裸路径），越界由 safe_rel_path 拦下
+    outside = c.delete("/api/notes/..%2F..%2Fetc%2Fpasswd.md")
+    assert outside.status_code in (400, 404)

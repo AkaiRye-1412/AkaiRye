@@ -80,7 +80,11 @@ def session_messages(session_id: int, conn: Connection = Depends(get_db)) -> lis
 
 @router.post("/ask")
 def ask(body: AskBody, conn: Connection = Depends(get_db)) -> dict:
-    """提问（Q-14 核心）：立即返回 {message_id}，token 流经 WS rag.stream。"""
+    """提问（Q-14 核心）：立即返回 {message_id, title}，token 流经 WS rag.stream。
+
+    title：会话仍是默认标题「新会话」时，后端用本次提问内容自动命名并回传该标题，
+    前端据此直接刷新下拉里的当前会话名（无需再拉一次会话列表）；已有标题时为 null。
+    """
     if not body.question.strip():
         raise HTTPException(status_code=422, detail={"code": "bad_request", "message": "问题不能为空"})
     try:

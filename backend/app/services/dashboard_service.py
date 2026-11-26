@@ -112,7 +112,12 @@ def _compute_summary(rows: list[dict], follow_up_days: int) -> dict:
                     {
                         "path": r["path"],
                         "customer": r["customer"],
-                        "project_name": r["project_name"],
+                        # 卡片式售后记录没有 project 字段，用正文 H1 作展示名（避免只显示日期）
+                        "project_name": (
+                            (r["note_title"] or r["project_name"])
+                            if r.get("note_mode") == "card"
+                            else r["project_name"]
+                        ),
                         "updated_date": r["updated_date"],
                         "days": days,
                     }

@@ -1,18 +1,49 @@
-# Python
+# ================= Python =================
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
-*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Node
+# ================= Node / 前端构建 =================
 node_modules/
 frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
 
-# 运行时数据（勿提交）
-data/workbench.db*
+# ================= 运行时数据（勿提交） =================
+# 20MB 本地库 + 每日备份 + 日志，都是本机运行产物
+data/workbench.db
+data/workbench.db-wal
+data/workbench.db-shm
 data/backups/
 data/logs/
+*.log
 
-# 环境
+# ================= 本机环境与密钥 =================
 .env
+.env.*
+!.env.example
+
+# ================= 本机工具缓存（本次重点） =================
+# .workbuddy 是 AI 开发过程目录：tmp 下有调试脚本和 78MB 浏览器 profile，
+# memory 是开发日志（含本机绝对路径）。只保留目录本身，内容不入库。
+.workbuddy/tmp/
+.workbuddy/memory/
+.workbuddy/*.json
+
+# Playwright MCP 的页面快照（每次调试自动生成，无长期价值）
+.playwright-mcp/
+
+# ================= 编辑器 / 操作系统 =================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ================= 临时文件 =================
+*.tmp
+*.bak

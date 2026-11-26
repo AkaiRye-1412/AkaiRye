@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import threading
 from datetime import date
 from pathlib import Path
@@ -26,8 +27,13 @@ STATUS_TO_YAML = {"active": "进行中", "archived": "已归档"}
 YAML_TO_STATUS = {"进行中": "active", "已归档": "archived", "active": "active", "archived": "archived"}
 
 REQUIRED_HEAD_FIELDS = ("name", "project", "status", "start_date", "updated")
+# v2「兼容真实卡片」口径：真实 vault 的售后卡片只有 name 必填，其余为项目笔记专用字段。
+# 判定见 required_head_fields()：有 project 或 start_date 视为项目笔记，否则按卡片处理。
+CARD_REQUIRED_FIELDS = ("name",)
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+_LIST_ITEM_RE = re.compile(r"^\s*-\s+(.*)$")
+_H1_RE = re.compile(r"^#\s+(.+)$")
 
 
 class EditConflict(Exception):
@@ -46,21 +52,97 @@ DEBOUNCE_SECONDS = 8.0
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str, bool, list[str]]:
     """解析 Markdown 头部。返回 (fields, body, head_ok, missing)。
 
-    仅支持扁平 `key: value` 行（售后笔记头部即此形态，无需引入 yaml 依赖）。
+    仅支持扁平 `key: value` 行 + YAML 列表（`tags:` 换行 `- a` 或 `tags: [a, b]`），
+    售后笔记头部即此形态，无需引入 yaml 依赖。列表项以逗号拼进同名字段。
     """
     m = _FRONTMATTER_RE.match(text)
     if not m:
-        return {}, text, False, list(REQUIRED_HEAD_FIELDS)
+        return {}, text, False, list(CARD_REQUIRED_FIELDS)
     fields: dict[str, str] = {}
+    list_owner: str | None = None
     for line in m.group(1).splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        item = _LIST_ITEM_RE.match(line)
+        if item and list_owner:
+            value = _clean_scalar(item.group(1))
+            if value:
+                fields[list_owner] = f"{fields[list_owner]}, {value}" if fields[list_owner] else value
             continue
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
-    missing = [f for f in REQUIRED_HEAD_FIELDS if not fields.get(f)]
+        key = key.strip()
+        value = _clean_scalar(value)
+        fields[key] = value
+        list_owner = key if not value else None
+    missing = [f for f in required_head_fields(fields) if not fields.get(f)]
     return fields, text[m.end():], not missing, missing
+
+
+def _clean_scalar(value: str) -> str:
+    """去引号、拆内联列表（`[a, b]` → `a, b`）。"""
+    v = value.strip()
+    if v.startswith("[") and v.endswith("]"):
+        v = v[1:-1]
+        parts = [_clean_scalar(x) for x in v.split(",")]
+        return ", ".join(x for x in parts if x)
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1]
+    return v
+
+
+def is_project_note(fields: dict[str, str]) -> bool:
+    """项目笔记 vs 按日期卡片：真实卡片没有 project / start_date（只有 name/time/tags/description）。"""
+    return bool(fields.get("project") or fields.get("start_date"))
+
+
+def required_head_fields(fields: dict[str, str]) -> tuple[str, ...]:
+    return REQUIRED_HEAD_FIELDS if is_project_note(fields) else CARD_REQUIRED_FIELDS
+
+
+def tags_of(fields: dict[str, str]) -> list[str]:
+    raw = fields.get("tags") or fields.get("tag") or ""
+    out: list[str] = []
+    for part in raw.split(","):
+        t = part.strip().strip("#")
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def extract_title(fields: dict[str, str], body: str, stem: str) -> str:
+    """列表标题：正文首个 H1 → 头部 title（去掉纯日期占位）→ 文件名。"""
+    for line in body.splitlines():
+        m = _H1_RE.match(line.strip())
+        if m:
+            return m.group(1).strip()
+    raw_title = (fields.get("title") or "").strip()
+    if raw_title and not _DATE_IN_NAME_RE.match(raw_title.replace("-", "")):
+        return raw_title
+    return stem
+
+
+_SUMMARY_SKIP_RE = re.compile(r"^(?:#{1,6}\s|>|\||```|~~~|!\[|<|-{3,}|\*{3,}|[_*]{2,}\s*$)")
+_LIST_LINE_RE = re.compile(r"^(?:[-*+]|\d+\.)\s+")
+_EMBED_RE = re.compile(r"!\[\[[^\]]*\]\]|!\[[^\]]*\]\([^)]*\)")
+_LINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]*))?\]\]|\[([^\]]*)\]\([^)]*\)")
+
+
+def extract_summary(body: str, limit: int = 80) -> str:
+    """列表摘要：正文第一段有效文本（跳过标题 / 表格 / 引用 / 图片 / 任务列表标记）。"""
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or _SUMMARY_SKIP_RE.match(line):
+            continue
+        text = _EMBED_RE.sub("", line)
+        text = _LINK_RE.sub(lambda m: m.group(2) or m.group(1) or m.group(3) or "", text)
+        text = _LIST_LINE_RE.sub("", text)
+        text = re.sub(r"[*_`~]", "", text).strip()
+        if not text:
+            continue
+        return text[:limit] + ("…" if len(text) > limit else "")
+    return ""
 
 
 def serialize_frontmatter(fields: dict[str, str], body: str) -> str:
@@ -114,6 +196,28 @@ def touch_updated(text: str, today: str) -> str:
     return _FRONTMATTER_RE.sub(_sub, text, count=1) if _FRONTMATTER_RE.match(text) else text
 
 
+def _apply_head_updates(text: str, updates: dict[str, str]) -> str:
+    """按行改写 frontmatter 指定键（缺失则追加），正文与其余键逐字不变。
+
+    仅用于标量键（name / project / status / start_date / updated）；不触碰 tags 这类
+    YAML 列表字段（改写单行会留下孤立的 `- item` 行）。无头部时新建头部块。
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        block = "\n".join(f"{k}: {v}" for k, v in updates.items())
+        return f"---\n{block}\n---\n\n{text}"
+    block = m.group(1)
+    for key, value in updates.items():
+        pattern = re.compile(rf"(?m)^{re.escape(key)}:.*$")
+        if pattern.search(block):
+            block = pattern.sub(f"{key}: {value}", block, count=1)
+        else:
+            block = block.rstrip("\n") + f"\n{key}: {value}"
+    tail = text[m.end(1):m.end()]  # 闭合 --- 之后的换行（判断原文空行习惯）
+    gap = "\n\n" if tail.endswith("\n\n") else "\n"
+    return f"---\n{block}\n---{gap}{text[m.end():]}"
+
+
 def _write_text(path: Path, text: str) -> None:
     """以字节写入（禁用 universal newline 翻译）：Windows 上 write_text 会把 \n 翻译成 \r\n，
     反复保存会造成 \r\r\n 累积损坏。"""
@@ -121,7 +225,12 @@ def _write_text(path: Path, text: str) -> None:
 
 
 def new_note_template(customer: str, project_name: str, start_date: str) -> str:
-    """FR-NOTE-10：固定头部字段骨架 + 日期小节格式。"""
+    """FR-NOTE-10：固定头部字段骨架 + 售后卡片一致的正文小节。
+
+    正文必须与 vault 里既有的售后卡片（`# 标题` + `> 售后支持卡片 |` + `## 小节`）同构，
+    否则预览里新建笔记会变成「**粗体标签** + --- 分隔线」的扁平表单样式，和老笔记观感割裂。
+    改动此处请同步 frontend/src/views/notes/NotesView.vue 的 newContentPreview()。
+    """
     fields = {
         "name": customer,
         "project": project_name,
@@ -131,12 +240,12 @@ def new_note_template(customer: str, project_name: str, start_date: str) -> str:
     }
     body = (
         f"# {project_name}\n\n"
-        f"## {start_date} 项目启动\n"
-        f"**现象**：\n\n"
-        f"**排查**：\n\n"
-        f"**处理**：\n\n"
-        f"**结果**：\n\n"
-        f"**待跟进**：\n"
+        "> 售后支持卡片 |\n"
+        "## 现象\n\n"
+        "## 配置\n\n"
+        "## 排查步骤\n\n"
+        "## 注意：\n\n"
+        "## 后续：\n"
     )
     return serialize_frontmatter(fields, body)
 
@@ -216,13 +325,14 @@ def scan_file(conn, abs_path: Path, rel_path: str, now_iso: str) -> dict:
     """扫描单个 .md → note_file upsert，返回行 dict。"""
     data = abs_path.read_bytes()
     text = data.decode("utf-8", errors="replace")
-    fields, _body, head_ok, _missing = parse_frontmatter(text)
+    fields, body, head_ok, _missing = parse_frontmatter(text)
     stat = abs_path.stat()
     updated_date = fields.get("updated") or date.fromtimestamp(stat.st_mtime).isoformat()
     try:
         updated_date = date.fromisoformat(updated_date[:10]).isoformat()
     except ValueError:
         updated_date = date.fromtimestamp(stat.st_mtime).isoformat()
+    tags = tags_of(fields)
     row = {
         "path": rel_path,
         "customer": fields.get("name") or None,
@@ -234,20 +344,27 @@ def scan_file(conn, abs_path: Path, rel_path: str, now_iso: str) -> dict:
         "file_mtime": int(stat.st_mtime),
         "content_hash": content_hash(data),
         "head_ok": 1 if head_ok else 0,
+        "note_title": extract_title(fields, body, abs_path.stem),
+        "summary": fields.get("description") or extract_summary(body),
+        "tags": ", ".join(tags),
+        "note_mode": "project" if is_project_note(fields) else "card",
         "scanned_at": now_iso,
     }
     conn.execute(
         """
         INSERT INTO note_file (path, customer, project_name, status, start_date, updated_date,
-                               file_mtime, content_hash, head_ok, scanned_at)
+                               file_mtime, content_hash, head_ok, note_title, summary, tags,
+                               note_mode, scanned_at)
         VALUES (:path, :customer, :project_name, :status, :start_date, :updated_date,
-                :file_mtime, :content_hash, :head_ok, :scanned_at)
+                :file_mtime, :content_hash, :head_ok, :note_title, :summary, :tags,
+                :note_mode, :scanned_at)
         ON CONFLICT(path) DO UPDATE SET
             customer=excluded.customer, project_name=excluded.project_name,
             status=excluded.status, start_date=excluded.start_date,
             updated_date=excluded.updated_date, file_mtime=excluded.file_mtime,
             content_hash=excluded.content_hash, head_ok=excluded.head_ok,
-            scanned_at=excluded.scanned_at
+            note_title=excluded.note_title, summary=excluded.summary, tags=excluded.tags,
+            note_mode=excluded.note_mode, scanned_at=excluded.scanned_at
         """,
         row,
     )
@@ -303,7 +420,7 @@ def read_note(conn, rel: str) -> dict:
         raise FileNotFoundError(rel)
     data = target.read_bytes()
     text = data.decode("utf-8", errors="replace")
-    fields, _body, head_ok, missing = parse_frontmatter(text)
+    fields, body, head_ok, missing = parse_frontmatter(text)
     return {
         "path": rel,
         "content": text,
@@ -312,6 +429,10 @@ def read_note(conn, rel: str) -> dict:
         "missing_fields": missing,
         "mtime": int(target.stat().st_mtime),
         "content_hash": content_hash(data),
+        "note_title": extract_title(fields, body, target.stem),
+        "summary": fields.get("description") or extract_summary(body),
+        "tags": tags_of(fields),
+        "note_mode": "project" if is_project_note(fields) else "card",
     }
 
 
@@ -387,24 +508,134 @@ def save_as(conn, rel: str, content: str, suggested_rel: str | None = None) -> d
 
 
 def set_status(conn, rel: str, status: str) -> dict:
-    """FR-NOTE-09：归档/恢复 —— 仅改头部 status 字段，不触碰正文。"""
+    """FR-NOTE-09：归档/恢复 —— 仅改头部 status 字段，不触碰正文。
+
+    v2：真实售后卡片没有 status 字段，归档时自动补写该键（不要求先跑存量整理）。
+    """
     from datetime import datetime, timezone
 
     target = safe_rel_path(conn, rel)
     if not target.is_file():
         raise FileNotFoundError(rel)
+    if status not in STATUS_TO_YAML:
+        raise ValueError("status 仅支持 active / archived")
     text = target.read_text(encoding="utf-8")
-    m = _FRONTMATTER_RE.match(text)
-    if not m or "status" not in m.group(1):
-        raise ValueError("missing_status_field")
-    block = re.sub(r"(?m)^status:.*$", f"status: {STATUS_TO_YAML[status]}", m.group(1))
-    text = f"---\n{block}\n---\n" + text[m.end():]
+    text = _apply_head_updates(text, {"status": STATUS_TO_YAML[status]})
     _write_text(target, text)
     row = scan_file(conn, target, rel, datetime.now(timezone.utc).isoformat(timespec="seconds"))
     conn.commit()
     broker.publish("note.changed", {"path": rel, "change": "modified",
                                     "customer": row["customer"], "project": row["project_name"]})
     return row
+
+
+# 头部字段 → frontmatter 键（客户沿用 name，项目名沿用 project，FR-NOTE-11）
+META_KEY_MAP = {"customer": "name", "project_name": "project", "status": "status", "start_date": "start_date"}
+
+
+def update_meta(
+    conn, rel: str, updates: dict[str, str | None], base_hash: str | None = None, force: bool = False
+) -> dict:
+    """更新头部字段（FR-NOTE-03/11）：只改 frontmatter，正文逐字保留。
+
+    冲突语义与 save_note 一致：文件当前 hash ≠ base_hash 且未 force → EditConflict。
+    """
+    from datetime import datetime, timezone
+
+    target = safe_rel_path(conn, rel)
+    if not target.is_file():
+        raise FileNotFoundError(rel)
+    data = target.read_bytes()
+    if base_hash is not None and content_hash(data) != base_hash and not force:
+        raise EditConflict(rel)
+    text = data.decode("utf-8", errors="replace")
+
+    patch: dict[str, str] = {}
+    for key, raw in updates.items():
+        if raw is None:
+            continue
+        if key not in META_KEY_MAP:
+            raise ValueError(f"不支持的头部字段：{key}")
+        value = str(raw).strip()
+        if key == "status":
+            if value not in STATUS_TO_YAML:
+                raise ValueError("status 仅支持 active / archived")
+            patch["status"] = STATUS_TO_YAML[value]
+        elif key == "start_date":
+            try:
+                patch["start_date"] = date.fromisoformat(value[:10]).isoformat()
+            except ValueError as exc:
+                raise ValueError("start_date 需为 YYYY-MM-DD") from exc
+        else:  # customer / project_name
+            if not value:
+                raise ValueError("客户与项目名不能为空")
+            patch[META_KEY_MAP[key]] = value
+    if not patch:
+        raise ValueError("没有需要更新的字段")
+
+    patch.setdefault("updated", date.today().isoformat())
+    _write_text(target, _apply_head_updates(text, patch))
+    row = scan_file(conn, target, rel, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    conn.commit()
+    broker.publish("note.changed", {"path": rel, "change": "modified",
+                                    "customer": row["customer"], "project": row["project_name"]})
+    info = read_note(conn, rel)
+    info["note"] = row
+    return info
+
+
+# ---- 删除（FR-NOTE-12：软删除，回收站可还原） -----------------------------
+
+TRASH_DIR_NAME = ".trash"
+
+
+def delete_note(conn, rel: str) -> dict:
+    """删除笔记 → 移入 vault 根目录下的 `.trash/`（Obsidian 回收站同名目录）。
+
+    不做不可恢复的物理抹除：文件改名 `YYYYMMDD-HHMMSS-原名.md` 后移动，
+    在 Obsidian 或资源管理器里拖回原目录即可还原；`.trash` 不在 notes_dir 扫描范围，
+    删除后不会重新出现在列表里。
+    同步清理 note_file 缓存行与块三件套（RAG 引用不留脏数据）。
+    """
+    from datetime import datetime
+
+    from app.services import indexer
+
+    target = safe_rel_path(conn, rel)
+    if not target.is_file():
+        raise FileNotFoundError(rel)
+    if target.suffix.lower() != ".md":
+        raise ValueError("仅支持删除 .md 笔记")
+
+    root = vault_root(conn)
+    trash_dir = root / TRASH_DIR_NAME
+    trash_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stem = f"{stamp}-{target.stem}"
+    dest = trash_dir / f"{stem}.md"
+    seq = 2
+    while dest.exists():  # 同一秒删同名文件时不覆盖
+        dest = trash_dir / f"{stem}-{seq}.md"
+        seq += 1
+    shutil.move(str(target), str(dest))
+
+    indexer.delete_note_index(conn, rel)
+    conn.execute("DELETE FROM note_file WHERE path=?", (rel,))
+    conn.commit()
+
+    trashed_to = dest.as_posix()
+    try:
+        trashed_to = dest.relative_to(root).as_posix()
+    except ValueError:  # 外部白名单目录里的笔记可能不在 vault 根下
+        pass
+    broker.publish("note.deleted", {"path": rel, "trashed_to": trashed_to})
+    return {
+        "deleted": True,
+        "path": rel,
+        "trashed_to": trashed_to,
+        "deleted_at": datetime.now().isoformat(timespec="seconds"),
+    }
 
 
 # ---- watchdog 监听（FR-NOTE-06，R6 防抖 + hash 去重） ----------------------

@@ -13,6 +13,7 @@ import Icon from '@/components/Icon.vue'
 import type { RagCitation } from '@/api'
 import { useRagStore, type ScopeMode } from '@/stores/rag'
 import { useUiStore } from '@/stores/ui'
+import { copyText } from '@/utils/clipboard'
 import { renderMarkdown } from './md'
 
 const rag = useRagStore()
@@ -252,6 +253,28 @@ function openCitation(g: CitGroup) {
   if (target?.note_path) openNote(target.note_path)
 }
 
+/**
+ * 代码块复制：按钮由 md.ts 生成在 v-html 里（拿不到 Vue 事件），
+ * 统一在消息列表做事件委托。
+ */
+async function onCopyCode(e: MouseEvent) {
+  const btn = (e.target as HTMLElement | null)?.closest('.code-copy') as HTMLButtonElement | null
+  if (!btn) return
+  const codeEl = btn.closest('.code-wrap')?.querySelector('pre')
+  // marked 的 <pre> 末尾常带一个换行，复制时去掉，粘到终端/编辑器里不会多空一行
+  const text = (codeEl?.textContent ?? '').replace(/\s+$/, '')
+  const label = btn.querySelector('span')
+  const ok = await copyText(text)
+  btn.classList.toggle('done', ok)
+  if (label) label.textContent = ok ? '已复制' : '复制失败'
+  window.setTimeout(() => {
+    // 流式回答每帧都会重渲染，旧按钮可能已脱离文档，脱离就不用还原了
+    if (!btn.isConnected) return
+    btn.classList.remove('done')
+    if (label) label.textContent = '复制'
+  }, 1600)
+}
+
 /** 来源只展示文档名（用户口径：能看出出自哪篇即可）；章节与片段放 tooltip。 */
 function docName(ct: RagCitation): string {
   if (ct.note_path) return ct.note_path.split('/').pop() || ct.source_name
@@ -396,7 +419,7 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
       </div>
     </header>
 
-    <div ref="listEl" class="msg-list">
+    <div ref="listEl" class="msg-list" @click="onCopyCode">
       <div v-if="!rag.messages.length && !rag.streaming" class="rag-empty">
         <div class="empty-ic"><Icon name="sparkle" :size="20" /></div>
         <p class="empty-title">向知识库提问</p>
@@ -725,6 +748,43 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
   margin: 6px 0;
 }
 .md :deep(pre code) { background: none; padding: 0; }
+
+/* 代码块右上角复制按钮（按钮由 md.ts 插在 .code-wrap 内，点击走列表事件委托） */
+.md :deep(.code-wrap) { position: relative; }
+.md :deep(.code-wrap pre) { padding-right: 60px; }
+.md :deep(.code-copy) {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 10.5px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: color 0.15s, border-color 0.15s, background 0.15s, opacity 0.15s;
+}
+.md :deep(.code-wrap:hover .code-copy) { opacity: 1; }
+.md :deep(.code-copy:hover) {
+  color: var(--blue-ink);
+  border-color: var(--blue-line);
+  background: #fff;
+}
+.md :deep(.code-copy.done) {
+  color: var(--green-ink);
+  border-color: var(--green-line);
+  background: var(--green-soft);
+  opacity: 1;
+}
+.md :deep(.code-copy svg) { width: 11px; height: 11px; flex: none; }
 .md :deep(table) { border-collapse: collapse; margin: 6px 0; font-size: 11.5px; width: 100%; }
 .md :deep(th), .md :deep(td) { border: 1px solid var(--line); padding: 3px 6px; text-align: left; }
 .md :deep(th) { background: #f4f3ee; font-weight: 600; }
@@ -738,6 +798,8 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
 }
 .md :deep(hr) { border: none; border-top: 1px solid var(--line-soft); margin: 8px 0; }
 .md :deep(a) { color: var(--blue-ink); }
+.md :deep(.katex) { font-size: 1.02em; }
+.md :deep(.katex-display) { margin: 8px 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
 
 /* 引用：每个文档只出一个标签，仅显示文档名；章节细节放 tooltip */
 .citations { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 7px; }

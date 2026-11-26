@@ -192,6 +192,13 @@ watch(
         </aside>
       </div>
     </div>
+
+    <!-- 全局轻提示：ui.toast() 的渲染宿主（此前只写状态、无处渲染，导致提示静默丢失） -->
+    <div v-if="ui.toasts.length" class="toast-host" aria-live="polite">
+      <div v-for="t in ui.toasts" :key="t.id" class="toast" :class="t.kind">
+        <span class="toast-dot" />{{ t.message }}
+      </div>
+    </div>
   </div>
 </template>
 

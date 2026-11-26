@@ -228,11 +228,17 @@ export const useRagStore = defineStore('rag', () => {
     ]
 
     try {
-      const { message_id } = await ragApi.ask({
+      const { message_id, title } = await ragApi.ask({
         session_id: currentSessionId.value!,
         question: q,
         scope: scopePayload(),
       })
+      // 首次提问：后端用问题内容自动命名会话，这里同步下拉里的标题（无需再拉列表）
+      if (title) {
+        sessions.value = sessions.value.map((s) =>
+          s.id === currentSessionId.value ? { ...s, title } : s,
+        )
+      }
       streaming.value = { id: message_id, role: 'assistant', content: '', done: false }
     } catch (e) {
       generating.value = false

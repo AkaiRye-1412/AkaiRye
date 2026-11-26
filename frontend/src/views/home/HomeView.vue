@@ -434,7 +434,7 @@ onBeforeUnmount(() => {
                 <span class="hbar-open">{{ c.open }} 未结</span>
               </div>
             </div>
-            <div v-else class="chart-empty">暂无客户数据</div>
+            <div v-else class="chart-empty chart-empty-block">暂无客户数据</div>
           </div>
         </div>
 
@@ -648,6 +648,8 @@ onBeforeUnmount(() => {
   background: #fcfcfb;
   padding: 11px 13px 8px;
   min-width: 0;
+  /* 定位上下文：卡内空态 .chart-empty 是 inset:0 绝对定位，缺这行会以 .main 为基准铺满主区 */
+  position: relative;
 }
 .chart-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
 .chart-head h3 { font-size: 12.5px; font-weight: 600; margin: 0 0 1px; }
@@ -662,6 +664,13 @@ onBeforeUnmount(() => {
   background: #fcfcfb;
   color: var(--muted);
   font-size: 12px;
+}
+/* 客户分布空态：无图表容器可覆盖，改为卡内静态占位（高度对齐有数据时的横条区） */
+.chart-empty-block {
+  position: static;
+  inset: auto;
+  min-height: 150px;
+  background: transparent;
 }
 
 .hbar-list { display: flex; flex-direction: column; gap: 11px; padding: 10px 2px 4px; }

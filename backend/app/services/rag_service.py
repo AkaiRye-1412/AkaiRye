@@ -65,6 +65,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+DEFAULT_SESSION_TITLE = "新会话"
+SESSION_TITLE_MAX = 24
+
+
+def derive_session_title(question: str) -> str:
+    """用首次提问的内容作会话标题：取首行、压缩空白、超长截断。
+
+    标题纯展示用（下拉/列表），不参与检索与排序口径。
+    """
+    text = (question or "").strip()
+    if not text:
+        return DEFAULT_SESSION_TITLE
+    first_line = text.splitlines()[0]
+    flat = " ".join(first_line.split())
+    if not flat:
+        return DEFAULT_SESSION_TITLE
+    return flat if len(flat) <= SESSION_TITLE_MAX else flat[:SESSION_TITLE_MAX].rstrip() + "…"
+
+
 def list_sessions(conn) -> list[dict]:
     rows = conn.execute(
         "SELECT id, title, created_at, updated_at FROM rag_session ORDER BY updated_at DESC, id DESC"
@@ -76,7 +95,7 @@ def create_session(conn, title: str | None = None) -> dict:
     now = _now()
     cur = conn.execute(
         "INSERT INTO rag_session (title, created_at, updated_at) VALUES (?, ?, ?)",
-        (title or "新会话", now, now),
+        (title or DEFAULT_SESSION_TITLE, now, now),
     )
     conn.commit()
     row = conn.execute("SELECT id, title, created_at, updated_at FROM rag_session WHERE id=?", (cur.lastrowid,)).fetchone()
@@ -135,6 +154,30 @@ def clear_session_messages(conn, session_id: int) -> int | None:
     conn.execute("UPDATE rag_session SET updated_at=? WHERE id=?", (_now(), session_id))
     conn.commit()
     return cur.rowcount
+
+
+def backfill_default_titles(conn) -> int:
+    """把仍是默认标题的会话按「第一条提问」补齐（旧数据/重启后跑，幂等）。
+
+    没有用户消息的空会话保持默认标题，不动。
+    """
+    rows = conn.execute("SELECT id FROM rag_session WHERE title=?", (DEFAULT_SESSION_TITLE,)).fetchall()
+    changed = 0
+    for row in rows:
+        first = conn.execute(
+            "SELECT content FROM rag_message WHERE session_id=? AND role='user' ORDER BY id LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        if first is None:
+            continue
+        conn.execute(
+            "UPDATE rag_session SET title=? WHERE id=?",
+            (derive_session_title(first["content"]), row["id"]),
+        )
+        changed += 1
+    if changed:
+        conn.commit()
+    return changed
 
 
 def session_messages(conn, session_id: int) -> list[dict]:
@@ -362,10 +405,11 @@ def _finish_message(conn, message_id: int, session_id: int, content: str, model_
 
 
 def ask(conn, session_id: int, question: str, scope: dict, conn_factory) -> dict:
-    """提问入口：落 user+assistant 消息，后台线程流式生成。返回 {message_id}。
+    """提问入口：落 user+assistant 消息，后台线程流式生成。返回 {message_id, title}。
 
     - 同会话并发 → ValueError('state_conflict')（API 层转 409）；
-    - 会话不存在 → KeyError（API 层转 404）。
+    - 会话不存在 → KeyError（API 层转 404）；
+    - title：本次自动命名后的会话标题；未改动（已有标题）时为 None。
     """
     if conn.execute("SELECT 1 FROM rag_session WHERE id=?", (session_id,)).fetchone() is None:
         raise KeyError(session_id)
@@ -388,13 +432,26 @@ def ask(conn, session_id: int, question: str, scope: dict, conn_factory) -> dict
     )
     message_id = a_cur.lastrowid
     user_message_id = cur.lastrowid
+
+    # 会话标题自动命名：仍是默认标题时，用会话里的第一条提问命名（用户手动改过的标题不动）。
+    # 取"第一条"而非本次问题：清空消息后重建、或历史会话一直是默认标题时，口径仍是首次输入。
+    auto_title = None
+    row = conn.execute("SELECT title FROM rag_session WHERE id=?", (session_id,)).fetchone()
+    if row is not None and row["title"] == DEFAULT_SESSION_TITLE:
+        first = conn.execute(
+            "SELECT content FROM rag_message WHERE session_id=? AND role='user' ORDER BY id LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        auto_title = derive_session_title(first["content"] if first is not None else question)
+        conn.execute("UPDATE rag_session SET title=? WHERE id=?", (auto_title, session_id))
+
     conn.commit()
 
     threading.Thread(
         target=_generate_worker, daemon=True, name=f"rag-gen-{message_id}",
         args=(conn_factory, session_id, message_id, user_message_id, question, scope, ctx_snap),
     ).start()
-    return {"message_id": message_id}
+    return {"message_id": message_id, "title": auto_title}
 
 
 def _generate_worker(conn_factory, session_id: int, message_id: int, user_message_id: int,

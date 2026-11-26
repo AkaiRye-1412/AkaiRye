@@ -94,6 +94,34 @@ class SaveNoteBody(BaseModel):
     base_hash: str | None = None  # 客户端加载时的 content_hash；缺失视为未知基线
 
 
+class MetaBody(BaseModel):
+    """头部字段更新（FR-NOTE-03/11）：只改 frontmatter，正文不动。"""
+
+    customer: str | None = None
+    project_name: str | None = None
+    status: str | None = None  # active | archived
+    start_date: str | None = None  # YYYY-MM-DD
+    base_hash: str | None = None
+    force: bool = False
+
+
+@router.patch("/{path:path}/meta")
+def patch_meta(path: str, body: MetaBody, conn: Connection = Depends(get_db)) -> dict:
+    """更新客户 / 项目名 / 状态 / 开始日期；冲突语义同保存（409 edit_conflict）。"""
+    updates = {
+        "customer": body.customer,
+        "project_name": body.project_name,
+        "status": body.status,
+        "start_date": body.start_date,
+    }
+    try:
+        return vault.update_meta(conn, path, updates, body.base_hash, body.force)
+    except vault.EditConflict as exc:
+        raise _to_409(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _map_common(exc) from exc
+
+
 @router.put("/{path:path}")
 def save_note(
     path: str,
@@ -169,6 +197,15 @@ def reindex_note(path: str, conn: Connection = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail={"code": "note_not_found", "message": "笔记不存在"})
     broker.publish("index.updated", {"note_path": path, "status": result["status"], "chunks": result["chunks"]})
     return result
+
+
+@router.delete("/{path:path}")
+def delete_note(path: str, conn: Connection = Depends(get_db)) -> dict:
+    """删除笔记（FR-NOTE-12）：移入 vault 根目录 `.trash/`，可从 Obsidian 还原，不做物理抹除。"""
+    try:
+        return vault.delete_note(conn, path)
+    except Exception as exc:  # noqa: BLE001
+        raise _map_common(exc) from exc
 
 
 # 注意：GET 内容路由必须最后注册（path:path 会吞掉 /history 等子路径）

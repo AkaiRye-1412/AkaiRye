@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS note_file (
     head_ok        INTEGER NOT NULL DEFAULT 0,
     indexed_status TEXT CHECK (indexed_status IN ('ready','pending','failed','excluded')),
     last_error     TEXT,
+    -- v2：列表展示用派生字段（整表重扫可重建，不新增真相源）
+    note_title     TEXT,                           -- 正文首个 H1 → title 字段 → 文件名
+    summary        TEXT,                           -- description → 正文首段（截断）
+    tags           TEXT,                           -- 逗号分隔；兼容 YAML 列表与 [a, b] 内联
+    note_mode      TEXT CHECK (note_mode IN ('project','card')),  -- 项目笔记 / 按日期卡片
     scanned_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_note_file_status    ON note_file (status);

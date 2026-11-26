@@ -104,6 +104,89 @@ def test_session_crud(client):
 
 # ---- 流式 ask 与引用（Q-14 / FR-RAG-20/21） -------------------------------------
 
+def test_first_question_auto_names_session(client, monkeypatch):
+    """首次提问用问题内容自动命名会话；已有标题（含手动改名）不被覆盖。"""
+    c, _, _ = client
+
+    def fake_llm(conn, messages):
+        yield "张力已通过调整 PID 恢复 [1]。"
+
+    monkeypatch.setattr(rag_service, "_llm_stream", fake_llm)
+
+    s = c.post("/api/rag/sessions", json={}).json()
+    assert s["title"] == "新会话"
+
+    ask = c.post("/api/rag/ask", json={"session_id": s["id"], "question": "张力波动",
+                                       "scope": {"mode": "all"}}).json()
+    assert ask["title"] == "张力波动"
+    _wait_done(c, ask["message_id"])
+
+    lst = c.get("/api/rag/sessions").json()
+    assert lst[0]["title"] == "张力波动"
+
+    # 第二次提问不再改名（title 回 None）
+    ask2 = c.post("/api/rag/ask", json={"session_id": s["id"], "question": "再问一个别的",
+                                        "scope": {"mode": "all"}}).json()
+    assert ask2["title"] is None
+    _wait_done(c, ask2["message_id"])
+    assert c.get("/api/rag/sessions").json()[0]["title"] == "张力波动"
+
+    # 手动改名后提问：不覆盖用户命名
+    s2 = c.post("/api/rag/sessions", json={"title": "手工标题"}).json()
+    ask3 = c.post("/api/rag/ask", json={"session_id": s2["id"], "question": "随便问问",
+                                        "scope": {"mode": "all"}}).json()
+    assert ask3["title"] is None
+    _wait_done(c, ask3["message_id"])
+    titles = {x["id"]: x["title"] for x in c.get("/api/rag/sessions").json()}
+    assert titles[s2["id"]] == "手工标题"
+
+    # 兼容旧会话：标题仍是默认值但已有历史 → 用会话里的第一条问题命名
+    s3 = c.post("/api/rag/sessions", json={}).json()
+    c.post("/api/rag/ask", json={"session_id": s3["id"], "question": "第一条问题",
+                                 "scope": {"mode": "all"}})
+    c.patch(f"/api/rag/sessions/{s3['id']}", json={"title": "新会话"})  # 模拟历史遗留数据
+    ask4 = c.post("/api/rag/ask", json={"session_id": s3["id"], "question": "第二条不同的问题",
+                                        "scope": {"mode": "all"}}).json()
+    assert ask4["title"] == "第一条问题"
+    _wait_done(c, ask4["message_id"])
+
+
+def test_backfill_default_titles(client, monkeypatch):
+    """启动补齐：仍是默认标题且有历史的会话，按第一条提问命名（幂等）。"""
+    from app.db import database
+
+    c, _, _ = client
+    monkeypatch.setattr(rag_service, "_llm_stream", lambda conn, messages: iter(["资料见 [1]。"]))
+    s = c.post("/api/rag/sessions", json={}).json()
+    ask = c.post("/api/rag/ask", json={"session_id": s["id"], "question": "第一条问题",
+                                       "scope": {"mode": "all"}}).json()
+    _wait_done(c, ask["message_id"])
+    c.patch(f"/api/rag/sessions/{s['id']}", json={"title": "新会话"})  # 模拟旧数据
+
+    empty = c.post("/api/rag/sessions", json={}).json()  # 空会话保持默认标题
+
+    with database.get_conn() as conn:
+        renamed = rag_service.backfill_default_titles(conn)
+        assert renamed == 1
+        assert rag_service.backfill_default_titles(conn) == 0  # 幂等
+
+    titles = {x["id"]: x["title"] for x in c.get("/api/rag/sessions").json()}
+    assert titles[s["id"]] == "第一条问题"
+    assert titles[empty["id"]] == "新会话"
+
+
+def test_derive_session_title():
+    """标题派生：取首行、压缩空白、超长截断加省略号。"""
+    d = rag_service.derive_session_title
+    assert d("  张力波动  ") == "张力波动"
+    assert d("第一行问题\n第二行补充") == "第一行问题"
+    assert d("多余    空白") == "多余 空白"
+    assert d("") == "新会话"
+    long = "超长问题" * 10
+    out = d(long)
+    assert len(out) == rag_service.SESSION_TITLE_MAX + 1 and out.endswith("…")
+
+
 def test_ask_stream_and_citations(client, monkeypatch):
     c, _, _ = client
     s = c.post("/api/rag/sessions", json={}).json()

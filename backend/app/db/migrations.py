@@ -3,6 +3,8 @@
 v1 = 初始 12 表（03 文档）；
 chunk_vec（vec0 虚表）在扩展加载成功时于 v1 一起创建，失败时标记待补
 （后续迁移或重启时重试，避免阻断启动）。
+v2 = note_file 增加列表展示派生字段（note_title / summary / tags / note_mode），
+     由整表重扫重建，不新增真相源。
 """
 
 import logging
@@ -55,6 +57,32 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         # 已迁移但 vec 表缺失（上次扩展不可用）：静默重试
         if _try_create_vec_table(conn):
             conn.commit()
+
+    if 2 not in applied:
+        _migrate_v2_note_file_columns(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (2, 'note_file_display_fields', ?)",
+            (_utcnow(),),
+        )
+        conn.commit()
+        logger.info("迁移 v2 完成（note_file 增加 note_title / summary / tags / note_mode）")
+
+
+# v2：note_file 列表展示派生字段（列已存在则跳过，兼容 v1 新库与旧库）
+_NOTE_FILE_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("note_title", "TEXT"),
+    ("summary", "TEXT"),
+    ("tags", "TEXT"),
+    ("note_mode", "TEXT"),
+)
+
+
+def _migrate_v2_note_file_columns(conn: sqlite3.Connection) -> None:
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(note_file)").fetchall()}
+    for name, decl in _NOTE_FILE_V2_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE note_file ADD COLUMN {name} {decl}")
+    # 旧行为 NULL：下次 GET /api/notes（或启动重扫）时由 scan_file 填充
 
 
 def _vec_table_exists(conn: sqlite3.Connection) -> bool:
