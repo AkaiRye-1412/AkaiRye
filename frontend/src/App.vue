@@ -83,6 +83,10 @@ watch(
 
 <template>
   <div class="app">
+    <!-- 背景壁纸：底层图片虚化，上层蒙层压住亮度以保证浅色主题可读性（样式见 main.css） -->
+    <div class="app-bg" aria-hidden="true" />
+    <div class="app-scrim" aria-hidden="true" />
+
     <!-- 左侧：个人信息 / 导航 / Vault 状态 -->
     <aside class="sidebar">
       <div class="profile-card">

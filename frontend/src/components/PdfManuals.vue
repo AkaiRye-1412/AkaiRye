@@ -878,7 +878,8 @@ onUnmounted(() => {
   white-space: nowrap;
   color: var(--muted);
 }
-.pp-num { font-variant-numeric: tabular-nums; color: var(--muted); }
+/* 进度百分比是最该被扫到的数字，原来跟着 muted 灰完全看不出来 */
+.pp-num { font-variant-numeric: tabular-nums; color: var(--blue-ink); font-weight: 700; font-size: 12px; }
 .pp-bar { height: 4px; border-radius: 2px; background: var(--line-soft); overflow: hidden; }
 .pp-bar i {
   display: block;

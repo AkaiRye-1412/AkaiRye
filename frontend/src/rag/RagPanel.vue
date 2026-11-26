@@ -532,7 +532,8 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
   height: 100%;
   min-height: 0;
   width: 100%;
-  background: var(--card);
+  /* 底色交给外层 .rag-dock（半透明磨砂），面板自身透明才能透出壁纸 */
+  background: transparent;
 }
 
 /* ---- 头部 ---- */

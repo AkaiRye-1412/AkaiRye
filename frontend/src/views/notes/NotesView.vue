@@ -1140,12 +1140,14 @@ onUnmounted(() => {
 .page-notes.split .note-row.active { background: #eef4fb; box-shadow: inset 2px 0 0 var(--blue); }
 .page-notes.split .note-row.active:hover { background: #e9f1fa; }
 .notes-table-head {
-  height: 30px;
-  font-size: 10px;
-  color: var(--muted);
+  height: 32px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--ink);
   border-top: 1px solid var(--line-soft);
-  border-bottom: 1px solid var(--line-soft);
-  background: #fbfaf7;
+  border-bottom: 1px solid rgba(226, 223, 214, 0.95);
+  /* 表头是一条贯穿的窄带，底色比卡片略实一点才能从下面透出的壁纸里立起来 */
+  background: rgba(255, 255, 255, 0.58);
   letter-spacing: 0.3px;
 }
 .notes-list { display: flex; flex-direction: column; max-height: calc(100vh - 300px); overflow: auto; }
@@ -1184,8 +1186,9 @@ onUnmounted(() => {
 .note-row:hover { background: #f8f9fb; }
 .nr-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .nr-title {
-  font-size: 13px;
-  font-weight: 560;
+  font-size: 13.5px;
+  font-weight: 640;
+  color: var(--ink);
   line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
@@ -1195,11 +1198,13 @@ onUnmounted(() => {
   gap: 6px;
 }
 .nr-title .badge { flex: none; }
-.nr-summary { font-size: 10.5px; line-height: 1.45; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 模块更透之后，摘要这行最容易被背景纹理吃掉，从 muted 抬到 ink-2（仍明显弱于标题） */
+.nr-summary { font-size: 10.5px; line-height: 1.45; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nr-status { font-size: 11px; }
-.nr-date { font-size: 11px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.nr-date em { display: block; font-style: normal; font-size: 9.5px; color: var(--muted); margin-top: 2px; }
-.nr-date strong { font-weight: 550; }
+/* 日期两列（开始 / 最近更新）：字号和字重抬一档，时间信息本来就是要快速扫的字段 */
+.nr-date { font-size: 11.5px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.nr-date em { display: block; font-style: normal; font-size: 10px; color: var(--ink-2); margin-top: 2px; }
+.nr-date strong { font-weight: 640; }
 .nr-tags { display: flex; gap: 3px; flex-wrap: wrap; overflow: hidden; max-height: 20px; }
 .nr-act {
   position: relative;

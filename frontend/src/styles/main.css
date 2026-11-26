@@ -48,6 +48,16 @@
   --accent: var(--blue);
   --sidebar-width: 218px;
   --rag-panel-width: 384px;
+
+  /* 背景壁纸调节旋钮 */
+  --wallpaper-blur: 0px;   /* 背景图虚化半径，0 = 原图清晰 */
+  --wallpaper-veil: 0.18;  /* 蒙层浓度，越大越白越淡（底部自动 +0.13） */
+
+  /* 玻璃面板配方：背景不虚化时，靠面板自带的 backdrop 磨砂托住文字对比度。
+     --glass 给大片容器，--glass-strong 给信息密度高的区域（导航/面板/表头） */
+  --glass: rgba(255, 255, 255, 0.36);
+  --glass-strong: rgba(255, 255, 255, 0.48);
+  --glass-blur: blur(22px) saturate(1.1);
 }
 
 * { box-sizing: border-box; }
@@ -75,6 +85,31 @@ a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar-thumb:hover { background: #c8c4b9; background-clip: content-box; border: 3px solid transparent; }
 ::selection { background: #cfe3fb; }
 
+/* ================= 背景壁纸 =================
+ * 两层固定铺满：
+ *  .app-bg    原图铺满（--wallpaper-blur: 0，不虚化），清晰透出
+ *  .app-scrim 很淡的白色蒙层，只负责把整体亮度提一点，不遮画面
+ * 背景不虚化后文字对比度改由各面板自己的 backdrop-filter 承担（见 --glass 系列令牌）。
+ */
+.app-bg,
+.app-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.app-bg {
+  background: #dfe3e6 url('/bg.jpg') center 45% / cover no-repeat;
+  filter: blur(var(--wallpaper-blur)) saturate(0.9) brightness(1.02);
+}
+.app-scrim {
+  background: linear-gradient(
+    180deg,
+    rgba(252, 252, 251, var(--wallpaper-veil)) 0%,
+    rgba(247, 246, 242, calc(var(--wallpaper-veil) + 0.13)) 100%
+  );
+}
+
 /* ================= 外壳布局 ================= */
 .app { display: flex; height: 100vh; min-width: 0; }
 
@@ -84,8 +119,12 @@ a { color: inherit; text-decoration: none; }
   display: flex;
   flex-direction: column;
   padding: 18px 12px 12px;
-  background: #fbfbf8;
-  border-right: 1px solid var(--line);
+  /* 半透明 + 磨砂：壁纸透出，导航文字靠 backdrop 磨砂托住 */
+  position: relative;
+  z-index: 1;
+  background: rgba(251, 251, 248, 0.26);
+  backdrop-filter: var(--glass-blur);
+  border-right: 1px solid rgba(231, 229, 221, 0.7);
   overflow: hidden;
 }
 
@@ -97,9 +136,14 @@ a { color: inherit; text-decoration: none; }
   margin: 0 2px 16px;
   padding: 11px 11px 10px;
   border-radius: 15px;
-  background: linear-gradient(145deg, #ffffff 0%, #fdfcff 56%, #f7f5ff 100%);
-  border: 1px solid #e8e5f0;
-  box-shadow: 0 10px 24px rgba(75, 68, 120, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.5) 0%,
+    rgba(253, 252, 255, 0.42) 56%,
+    rgba(247, 245, 255, 0.38) 100%
+  );
+  border: 1px solid rgba(232, 229, 240, 0.8);
+  box-shadow: 0 10px 24px rgba(75, 68, 120, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 .profile-card::before {
   content: '';
@@ -188,24 +232,28 @@ a { color: inherit; text-decoration: none; }
   border: 0;
   background: transparent;
   border-radius: 9px;
-  color: var(--ink-2);
-  font-size: 13px;
+  color: #5b5850;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
   text-align: left;
   position: relative;
   width: 100%;
   transition: background 0.14s, color 0.14s;
 }
 .nav-item:hover { background: #f1f0eb; color: var(--ink); }
-.nav-item.router-link-active { background: var(--blue-soft); color: var(--blue-ink); font-weight: 600; }
-.nav-ic { display: grid; place-items: center; width: 20px; color: currentColor; opacity: 0.82; flex: none; }
+.nav-item.router-link-active { background: var(--blue-soft); color: var(--blue-ink); font-weight: 620; }
+.nav-ic { display: grid; place-items: center; width: 20px; color: currentColor; flex: none; }
 .nav-item.router-link-active .nav-ic { opacity: 1; }
 .nav-label { flex: 1; white-space: nowrap; }
 .nav-sep { height: 1px; background: var(--line-soft); margin: 8px 6px; }
-.nav-util { color: var(--muted); }
+/* 工具类导航（存量整理 / PDF 手册）仍比主项弱一级，但已从 #6e6c65 提到 ink-2，
+   因为侧栏只有 0.26 白，压在壁纸上再浅就读不出来了 */
+.nav-util { color: #6e6b63; }
 
 /* 侧栏底部 Vault 卡 */
 .sidebar-foot { padding-top: 10px; }
-.vault-card { background: #f2f1eb; border: 1px solid var(--line); border-radius: 11px; padding: 10px 11px; }
+.vault-card { background: rgba(242, 241, 235, 0.42); border: 1px solid rgba(231, 229, 221, 0.8); border-radius: 11px; padding: 10px 11px; }
 .vault-card-top { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
 .vault-card-top em {
   margin-left: auto;
@@ -246,7 +294,14 @@ a { color: inherit; text-decoration: none; }
 .dot.err { background: var(--red); }
 
 /* ================= 顶栏 ================= */
-.shell { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.shell {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 1;
+}
 .topbar {
   height: var(--topbar-h);
   flex: none;
@@ -254,9 +309,9 @@ a { color: inherit; text-decoration: none; }
   align-items: center;
   gap: 16px;
   padding: 0 18px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(252, 252, 250, 0.9);
-  backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(231, 229, 221, 0.7);
+  background: rgba(252, 252, 250, 0.34);
+  backdrop-filter: var(--glass-blur);
   z-index: 5;
 }
 .topbar-title { display: flex; flex-direction: column; min-width: 96px; gap: 1px; }
@@ -313,7 +368,7 @@ kbd {
 
 .workspace { flex: 1; min-height: 0; display: flex; position: relative; }
 /* 主区 : 知识助手 = 3 : 2（面板展开时按 workspace 剩余宽度等比分配，收起时恢复窄轨） */
-.main { flex: 3 1 0; min-width: 0; overflow: auto; background: var(--bg); padding: 16px 18px 30px; position: relative; }
+.main { flex: 3 1 0; min-width: 0; overflow: auto; background: transparent; padding: 16px 18px 30px; position: relative; }
 /* 首页：整屏定高（页面自己 flex 分配高度，项目卡底边与右侧面板底边齐平），
    底部不留内边距、主区不整体滚动，改由卡片内部滚动 */
 .main.main-flush { padding-bottom: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -321,8 +376,10 @@ kbd {
   flex: 2 1 0;
   width: auto;
   min-width: 300px;
-  border-left: 1px solid var(--line);
-  background: var(--panel-bg);
+  border-left: 1px solid rgba(231, 229, 221, 0.7);
+  /* 知识助手是长时间阅读/输入的表面，比卡片再实一点：底图深色区透过来会让面板发灰显脏 */
+  background: rgba(255, 255, 255, 0.52);
+  backdrop-filter: var(--glass-blur);
   display: flex;
   min-height: 0;
   overflow: hidden;
@@ -401,11 +458,13 @@ kbd {
 .link-btn:hover { background: var(--blue-soft); }
 
 /* ================= 卡片 ================= */
+/* 毛玻璃：背景图不虚化，卡片用半透明白 + backdrop 磨砂，壁纸从卡片底下透出仍保可读 */
 .card {
-  background: var(--card);
-  border: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(231, 229, 221, 0.72);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 1px 2px rgba(23, 24, 26, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   min-width: 0;
 }
 .card-head { display: flex; align-items: center; gap: 10px; padding: 15px 18px 13px; flex-wrap: wrap; }

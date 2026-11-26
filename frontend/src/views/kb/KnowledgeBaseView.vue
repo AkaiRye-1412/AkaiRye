@@ -604,17 +604,19 @@ onUnmounted(() => {
 .kb-table-head,
 .kb-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 66px 48px 78px 62px;
+  grid-template-columns: minmax(0, 1fr) 66px 48px 84px 62px;
   gap: 10px;
   align-items: center;
   padding: 0 14px;
 }
 .kb-table-head {
-  height: 27px;
-  font-size: 10.5px;
-  color: var(--muted);
-  background: #fafaf7;
-  border-bottom: 1px solid var(--line-soft);
+  height: 30px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.58);
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid rgba(226, 223, 214, 0.95);
 }
 
 .kb-list { flex: 1; min-height: 0; overflow-y: auto; }
@@ -674,8 +676,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12.5px;
-  font-weight: 560;
+  font-size: 13.5px;
+  font-weight: 640;
   color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
@@ -693,7 +695,7 @@ onUnmounted(() => {
 }
 .kr-sub {
   font-size: 10.5px;
-  color: var(--muted);
+  color: var(--ink-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -711,9 +713,9 @@ onUnmounted(() => {
 .kb-badge.bad { background: var(--red-soft); color: var(--red); border-color: var(--red-line); }
 .kb-badge.muted { background: #f4f4f1; color: var(--muted); border-color: var(--line-soft); }
 
-.kr-chunks,
-.kr-date { font-size: 11px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.kr-date { color: var(--muted); }
+.kr-chunks { font-size: 11px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+/* 最近更新是这行的关键字段，之前被两层规则覆盖成最浅的 muted，几乎看不见 */
+.kr-date { font-size: 11.5px; font-weight: 640; color: var(--ink); font-variant-numeric: tabular-nums; }
 
 .kr-act {
   display: grid;
