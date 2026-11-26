@@ -35,6 +35,8 @@ const PATHS: Record<string, string> = {
   trash: '<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6.5 7v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V7"/><path d="M10 11v6M14 11v6"/>',
   eraser: '<path d="M9.5 20H5.8a2 2 0 0 1-1.4-.6l-1-1a2 2 0 0 1 0-2.8l8.3-8.3a2 2 0 0 1 2.8 0l4.2 4.2a2 2 0 0 1 0 2.8L12 20z"/><path d="m9 9 6 6"/><path d="M12 20h9"/>',
   more: '<path d="M5.5 12h.01M12 12h.01M18.5 12h.01"/>',
+  minusCircle: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
+  plusCircle: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
   arrowLeft: '<path d="M20 12H5"/><path d="m11 6-6 6 6 6"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
   columns: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/>',

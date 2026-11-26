@@ -29,6 +29,50 @@ EMBED_MAX_CHARS = 700
 _task_lock = threading.Lock()
 _running = False
 
+# 任务进度（进程内状态，供 /api/kb/stats 展示；不需要持久化，重启即归零）
+_progress_lock = threading.Lock()
+_progress: dict = {
+    "running": False,
+    "mode": "",          # autofill（补齐缺失）/ full（全量重建）
+    "total": 0,
+    "done": 0,
+    "failed": 0,
+    "current": "",
+    "started_at": None,
+    "finished_at": None,
+}
+
+
+def task_progress() -> dict:
+    """当前/上次索引任务进度快照（M3 进度条数据源）。"""
+    with _progress_lock:
+        return dict(_progress)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _progress_start(mode: str, total: int) -> None:
+    with _progress_lock:
+        _progress.update(
+            running=True, mode=mode, total=total, done=0, failed=0,
+            current="", started_at=_now_iso(), finished_at=None,
+        )
+
+
+def _progress_step(path: str, ok: bool) -> None:
+    with _progress_lock:
+        _progress["done"] += 1
+        if not ok:
+            _progress["failed"] += 1
+        _progress["current"] = path
+
+
+def _progress_end() -> None:
+    with _progress_lock:
+        _progress.update(running=False, current="", finished_at=_now_iso())
+
 
 # ---- 配置与白名单 ----------------------------------------------------------
 
@@ -57,6 +101,25 @@ def _in_whitelist(conn, rel: str) -> bool:
         if abs_p == abs_dir or abs_p.is_relative_to(abs_dir):
             return True
     return False
+
+
+def _norm_path(rel: str) -> str:
+    """路径比较口径：统一 posix（note_file.path 对外即 posix，绝对路径同为 posix）。"""
+    return Path(rel).as_posix()
+
+
+def excluded_paths(conn) -> set[str]:
+    """单篇移出知识库的名单（config `index.whitelist.excluded`，2026-11-26）。
+
+    与「文件夹级白名单」互补：目录仍纳入索引，但其中个别笔记被显式移出，
+    移出后在列表里保持可见（状态 excluded），可一键恢复，不重新参与切块/检索。
+    """
+    raw = config_service.get_raw(conn, "index.whitelist").get("excluded") or []
+    return {_norm_path(x) for x in raw if isinstance(x, str) and x.strip()}
+
+
+def is_excluded(conn, rel: str) -> bool:
+    return _norm_path(rel) in excluded_paths(conn)
 
 
 def _embed_texts(conn, texts: list[str]) -> list[list[float]] | None:
@@ -166,6 +229,11 @@ def index_note(conn, rel: str, *, force: bool = False) -> dict:
     if row is None:
         return {"status": "missing", "chunks": 0, "reason": "note_file 无此行"}
 
+    if is_excluded(conn, rel):
+        deleted = _delete_chunks(conn, rel)
+        _set_status(conn, rel, "excluded")
+        return {"status": "excluded", "chunks": 0, "reason": f"已移出知识库（删 {deleted} 块）"}
+
     if not _in_whitelist(conn, rel):
         deleted = _delete_chunks(conn, rel)
         _set_status(conn, rel, "excluded")
@@ -253,52 +321,137 @@ def delete_note_index(conn, rel: str) -> int:
 
 
 def reindex_all_notes(conn, *, force: bool = True) -> dict:
-    """全量重建（POST /api/kb/reindex）。同步执行——个人规模（数百篇）秒级完成。"""
+    """全量重建（POST /api/kb/reindex）。同步执行——个人规模（数百篇）秒级完成。
+
+    注意：embedding 已配置时每批 10 条 + 3s 节流，1425 块约需数分钟，
+    前端请用 background 模式（大库同步调用会 HTTP 超时）。
+    """
     vault.rescan_all(conn)
-    done = failed = excluded = 0
     rows = conn.execute("SELECT path FROM note_file").fetchall()
-    for r in rows:
-        rel = r["path"]
-        result = index_note(conn, rel, force=force)
-        if result["status"] in ("ready", "skipped"):
-            done += 1
-        elif result["status"] == "excluded":
-            excluded += 1
-        else:
-            failed += 1
-        broker.publish("index.updated", {"note_path": rel, "status": result["status"],
-                                         "chunks": result["chunks"]})
-    conn.commit()
+    _progress_start("full", len(rows))
+    done = failed = excluded = 0
+    try:
+        for r in rows:
+            rel = r["path"]
+            try:
+                result = index_note(conn, rel, force=force)
+            except Exception:  # noqa: BLE001 —— 单篇异常不中断整体任务
+                logger.exception("全量重建失败：%s", rel)
+                result = {"status": "failed", "chunks": 0}
+            if result["status"] in ("ready", "skipped"):
+                done += 1
+            elif result["status"] == "excluded":
+                excluded += 1
+            else:
+                failed += 1
+            _progress_step(rel, result["status"] in ("ready", "skipped", "excluded"))
+            broker.publish("index.updated", {"note_path": rel, "status": result["status"],
+                                             "chunks": result["chunks"]})
+        conn.commit()
+    finally:
+        _progress_end()
     return {"done": done, "failed": failed, "excluded": excluded, "total": len(rows)}
 
 
-def reindex_async(conn_factory, note_paths: list[str] | None = None, *, force: bool = True) -> dict:
-    """后台线程执行索引（API 立即返回任务确认；进度经 index.updated 推送）。"""
+def autofill_targets(conn) -> list[str]:
+    """待补齐索引的笔记（FR-RAG-01「自动索引，无需手动触发」）。
+
+    判定：在白名单内，且 状态非 ready 或虽然 ready 但一块都没有（历史遗留/向量表重建后）。
+    注意 excluded 也要纳入：它表示"上次被移出白名单"，重新纳入后必须补索引
+    （白名单外的笔记已由 _in_whitelist 排除，不会误扫）。
+    """
+    out: list[str] = []
+    excluded = excluded_paths(conn)
+    for r in conn.execute("SELECT path, indexed_status FROM note_file").fetchall():
+        rel = r["path"]
+        if _norm_path(rel) in excluded:  # 单篇移出：即使目录在白名单内也不补
+            continue
+        if not _in_whitelist(conn, rel):
+            continue
+        if r["indexed_status"] == "ready":
+            has = conn.execute("SELECT 1 FROM chunk WHERE note_path=? LIMIT 1", (rel,)).fetchone()
+            if has:
+                continue
+        out.append(rel)
+    return out
+
+
+def _run_task(conn_factory, mode: str, paths: list[str], *, force: bool) -> None:
+    """后台索引任务主体：逐篇索引并推进进度（进程内单任务串行）。"""
+    global _running
+    conn = None
+    try:
+        conn = conn_factory()
+        for rel in paths:
+            try:
+                result = index_note(conn, rel, force=force)
+                ok = result["status"] in ("ready", "skipped")
+                detail = {"note_path": rel, "status": result["status"], "chunks": result["chunks"]}
+            except Exception:  # noqa: BLE001 —— 单篇失败记录后继续
+                logger.exception("索引失败：%s", rel)
+                ok, detail = False, {"note_path": rel, "status": "failed", "chunks": 0}
+            _progress_step(rel, ok)
+            broker.publish("index.updated", {**detail, "progress": task_progress()})
+        if conn is not None:
+            conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
+        _progress_end()
+        broker.publish("index.updated", {"status": "task_done", "mode": mode,
+                                         "progress": task_progress()})
+        with _task_lock:
+            _running = False
+
+
+def start_task(conn_factory, *, mode: str, paths: list[str] | None = None,
+               force: bool = True, delay: float = 0.0) -> dict:
+    """启动后台索引任务（M3 队列语义）：立即返回，进度经 task_progress()/WS 获取。
+
+    - mode="autofill"：只在 paths 为空时按 autofill_targets 计算；
+    - mode="full"：paths 传 None → 后台线程内自行 rescan + 算全量。
+    已有任务在跑时返回 {started: False}（前端提示"已有任务进行中"）。
+    """
     global _running
     with _task_lock:
         if _running:
-            return {"started": False, "reason": "已有索引任务进行中"}
+            return {"started": False, "reason": "已有索引任务进行中", "progress": task_progress()}
         _running = True
 
+    if paths is not None:
+        _progress_start(mode, len(paths))
+        total_hint = len(paths)
+    else:
+        total_hint = 0
+
     def _worker() -> None:
-        global _running
+        # delay 用于启动钩子：先让服务对外可用，再做重活
+        if delay:
+            time.sleep(delay)
         try:
-            conn = conn_factory()
-            try:
-                if note_paths is None:
-                    reindex_all_notes(conn, force=force)
-                else:
-                    for rel in note_paths:
-                        index_note(conn, rel, force=force)
-                        broker.publish("index.updated", {"note_path": rel, "status": "indexed"})
-                    conn.commit()
-            finally:
-                conn.close()
+            if paths is None:
+                conn = conn_factory()
+                try:
+                    vault.rescan_all(conn)
+                    targets = autofill_targets(conn) if mode == "autofill" else [
+                        r["path"] for r in conn.execute("SELECT path FROM note_file").fetchall()
+                    ]
+                finally:
+                    conn.close()
+                _progress_start(mode, len(targets))
+                broker.publish("index.updated", {"status": "task_start", "mode": mode,
+                                                 "progress": task_progress()})
+                _run_task(conn_factory, mode, targets, force=force)
+            else:
+                broker.publish("index.updated", {"status": "task_start", "mode": mode,
+                                                 "progress": task_progress()})
+                _run_task(conn_factory, mode, paths, force=force)
         except Exception:  # noqa: BLE001 —— 后台任务异常必须记录且不传播
             logger.exception("后台索引任务失败")
-        finally:
+            _progress_end()
             with _task_lock:
                 _running = False
 
     threading.Thread(target=_worker, daemon=True, name="indexer-worker").start()
-    return {"started": True, "notes": len(note_paths) if note_paths else "all"}
+    return {"started": True, "mode": mode, "total": total_hint, "progress": task_progress()}
+

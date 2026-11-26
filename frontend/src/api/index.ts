@@ -158,3 +158,83 @@ export const manualsApi = {
   pdfUrl: (manualId: number) => `/api/reader/pdf/${manualId}`,
   meta: (manualId: number) => http.get<Record<string, any>>(`/api/reader/meta/${manualId}`),
 }
+
+
+/** 索引任务进度（M3）：后端进程内状态，running=false 时展示上一次的结果。 */
+export interface IndexProgress {
+  running: boolean
+  mode: '' | 'autofill' | 'full'
+  total: number
+  done: number
+  failed: number
+  current: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface KbStats {
+  notes: number
+  notes_by_status: { ready: number; pending: number; failed: number; excluded: number; unindexed: number }
+  manuals: number
+  chunks: number
+  vector_model: { model_id: string | null; dim: number | null }
+  indexing: IndexProgress
+  last_indexed_at: string | null
+}
+
+export interface KbNote {
+  path: string
+  display_name: string
+  group: string
+  customer: string | null
+  project_name: string | null
+  note_title: string | null
+  summary: string | null
+  updated_date: string | null
+  head_ok: number
+  indexed_status: 'ready' | 'pending' | 'failed' | 'excluded' | null
+  last_error: string | null
+  chunks: number
+}
+
+export const kbApi = {
+  stats: () => http.get<KbStats>('/api/kb/stats'),
+  notes: (query = '') => http.get<KbNote[]>(`/api/kb/notes${query}`),
+  whitelist: () =>
+    http.get<{ folders: string[]; invalid: string[]; excluded: string[]; notes_folder: string | null }>(
+      '/api/kb/whitelist',
+    ),
+  saveWhitelist: (folders: string[]) =>
+    http.put<{
+      folders: string[]
+      invalid: string[]
+      indexed: number
+      excluded: number
+      pending: number
+      indexing: boolean
+    }>('/api/kb/whitelist', { folders }),
+  /** 全量重建：后台执行（embedding 有节流，同步会超时），进度看 stats.indexing。 */
+  reindexAll: (body: { force?: boolean; background?: boolean } = { background: true }) =>
+    http.post<{ started: boolean; total?: number; reason?: string; done?: number; failed?: number }>(
+      '/api/kb/reindex',
+      body,
+    ),
+  /** 补齐缺失索引（FR-RAG-01）：把未索引/缺块/失败的笔记排进后台队列。 */
+  autofill: () =>
+    http.post<{ started: boolean; pending: number; reason?: string }>('/api/kb/autofill'),
+  reindexNote: (path: string) =>
+    http.post<{ status: string; chunks: number }>('/api/kb/notes/reindex', { path }),
+  /**
+   * 单篇移出 / 恢复知识库（不动磁盘文件）。
+   * 移出后该篇保持可见（状态「已移出」），不会被自动补齐拉回；恢复会立即重建索引。
+   */
+  excludeNote: (path: string, excluded: boolean) =>
+    http.post<{
+      path: string
+      excluded: boolean
+      status: string
+      chunks: number
+      in_whitelist: boolean
+      reason: string
+    }>('/api/kb/notes/exclude', { path, excluded }),
+}

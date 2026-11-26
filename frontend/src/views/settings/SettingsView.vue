@@ -6,7 +6,7 @@
  * - 测试连接不落库（04 文档 3.1）。
  */
 import { onMounted, reactive, ref } from 'vue'
-import { backupApi, configApi } from '@/api'
+import { backupApi, configApi, kbApi } from '@/api'
 import { useConfigStore } from '@/stores/config'
 import { useUiStore } from '@/stores/ui'
 
@@ -102,14 +102,28 @@ async function savePaths() {
         code_roots: paths.code_roots_text.split('\n').map((s) => s.trim()).filter(Boolean),
       },
     })
-    ui.toast('success', '路径已保存（热生效）')
+    // 换了 vault 等于换了一批笔记：显式触发后台补齐索引（FR-RAG-01）
+    const r = await kbApi.autofill()
+    ui.toast(
+      'success',
+      r.started ? `路径已保存，已排入 ${r.pending} 篇待索引（后台执行）` : '路径已保存（热生效）',
+    )
   } catch (e) { toastResult('保存', e) }
 }
 
 async function saveWhitelist() {
   try {
-    await configStore.save({ 'index.whitelist': { folders: whitelistFolders.value } })
-    ui.toast('success', '索引白名单已保存（纳入/移出将在知识库页触发增量）')
+    // 走 /api/kb/whitelist：后端会「移出 → 删块三件套；纳入 → 增量索引」并广播 index.updated。
+    // 直接写 config 只会存字符串，索引不会跟着变（2026-11-26 修复）。
+    const r = await kbApi.saveWhitelist(whitelistFolders.value)
+    whitelistFolders.value = r.folders
+    if (r.invalid?.length) {
+      ui.toast('warn', `目录不存在（已保留配置）：${r.invalid.join('、')}`)
+    } else if (r.indexing) {
+      ui.toast('info', `白名单已保存，${r.pending} 篇转入后台索引`)
+    } else {
+      ui.toast('success', `白名单已保存（索引 ${r.indexed} 篇，移出 ${r.excluded} 篇）`)
+    }
   } catch (e) { toastResult('保存', e) }
 }
 

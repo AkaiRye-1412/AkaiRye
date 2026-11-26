@@ -572,3 +572,44 @@ kbd {
   from { opacity: 0; scale: 0.97; }
   to { opacity: 1; scale: 1; }
 }
+
+/* ================= 搜索框（列表页通用：笔记 / 知识库 / 手册） ================= */
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  flex: 1 1 200px;
+  min-width: 120px;
+  max-width: 300px;
+  transition: border-color 0.14s, box-shadow 0.14s;
+}
+.search-field:focus-within {
+  border-color: var(--blue-line);
+  box-shadow: 0 0 0 3px rgba(42, 120, 214, 0.1);
+}
+.search-field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.search-field input::placeholder { color: var(--muted); }
+.search-clear {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border-radius: 4px;
+}
+.search-clear:hover { background: #f1f0eb; color: var(--ink); }

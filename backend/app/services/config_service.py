@@ -18,7 +18,7 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "llm": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": 0.7},
     "embedding": {"mode": "cloud", "provider": "", "api_key": "", "model": "", "dim": 1024},
     "paths": {"vault_root": "", "notes_folder": "客户售后问题", "pdf_root": "", "code_roots": []},
-    "index.whitelist": {"folders": ["客户售后问题"]},
+    "index.whitelist": {"folders": ["客户售后问题"], "excluded": []},
     "dashboard": {"follow_up_days": 7, "default_range": "month"},
     "backup": {"dir": "", "keep": 7},
     "shortcuts": {"global_ask": "Ctrl+K", "new_note": "Ctrl+N", "terminal": "Ctrl+T", "send": "Enter"},

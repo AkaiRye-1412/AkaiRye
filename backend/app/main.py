@@ -24,6 +24,16 @@ from app.ws import events
 logger = logging.getLogger(__name__)
 
 
+def config_ready_for_index() -> bool:
+    """vault 路径已配置且目录存在才补齐索引（否则白跑一遍扫描）。"""
+    try:
+        with database.get_conn() as conn:
+            return vault_service_module.notes_dir(conn).is_dir()
+    except Exception:  # noqa: BLE001 —— 配置缺失/路径非法都按未就绪处理
+        logger.warning("索引自检失败：vault 路径未配置或不可读")
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(getattr(logging, runtime.log_level.upper(), logging.INFO))
@@ -48,6 +58,17 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("vault watchdog 未启动：vault_root/notes_folder 尚未配置或目录不存在")
 
+    # 自动索引补齐（FR-RAG-01「无需手动触发」）：历史笔记此前只在文件被保存时才索引，
+    # 已存在的笔记会永远停在未索引。延迟 5s 让服务先对外可用，再在后台线程补齐。
+    from app.services import indexer as indexer_service
+
+    if config_ready_for_index():
+        started = indexer_service.start_task(
+            database.connect, mode="autofill", paths=None, force=False, delay=5.0
+        )
+        if started.get("started"):
+            logger.info("已排入自动索引补齐任务（后台执行）")
+
     # 配置热生效联动：路径配置变更后重挂 watchdog（无需重启服务）
     def _on_config_updated(payload: dict) -> None:
         if "paths" not in payload.get("keys", []):
@@ -58,6 +79,9 @@ async def lifespan(app: FastAPI):
             logger.info("路径配置变更：vault watchdog 已重新挂载")
         else:
             logger.warning("路径配置变更：vault watchdog 未启动（目录无效）")
+        # 注意：这里不自动排索引任务。路径变更后由前端在设置页保存成功后显式调
+        # POST /api/kb/autofill —— 隐式后台任务会与用户随后的操作（单篇重建/白名单调整）
+        # 并发写同一个库，SQLite 锁冲突会让同步索引莫名的少索引几篇。
 
     events.broker.subscribe("config.updated", _on_config_updated)
     yield

@@ -213,6 +213,63 @@ def test_single_reindex_endpoint(client):
     assert missing.status_code == 404
 
 
+def test_exclude_single_note_from_kb(client):
+    """单篇移出知识库（2026-11-26）：删块 + 进 excluded 名单，文件保留、自动补齐不再拉回、可恢复。"""
+    c, notes_dir = client
+    c.post("/api/kb/reindex")
+    path = "炬光-振镜温控.md"
+    assert (notes_dir / path).is_file()  # 前置：文件在磁盘上
+
+    resp = c.post("/api/kb/notes/exclude", json={"path": path, "excluded": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["excluded"] is True and body["status"] == "excluded" and body["chunks"] == 0
+    assert body["in_whitelist"] is True  # 目录仍纳入，只是这一篇被移出
+    assert (notes_dir / path).is_file()  # 笔记文件绝不能被删
+
+    rows = {n["path"]: n for n in c.get("/api/kb/notes").json()}
+    assert rows[path]["indexed_status"] == "excluded" and rows[path]["chunks"] == 0
+    assert path in c.get("/api/kb/whitelist").json()["excluded"]
+
+    # 补齐缺失不会把它拉回来（这是「移出」能持久生效的关键）
+    assert c.post("/api/kb/autofill").json()["pending"] == 0
+    rows = {n["path"]: n for n in c.get("/api/kb/notes").json()}
+    assert rows[path]["indexed_status"] == "excluded"
+
+    from app.db.database import connect
+
+    conn = connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) c FROM chunk WHERE note_path=?", (path,)
+        ).fetchone()["c"] == 0
+    finally:
+        conn.close()
+
+    # 恢复 → 重新切块索引
+    resp = c.post("/api/kb/notes/exclude", json={"path": path, "excluded": False})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready" and body["chunks"] >= 1
+    assert path not in c.get("/api/kb/whitelist").json()["excluded"]
+    rows = {n["path"]: n for n in c.get("/api/kb/notes").json()}
+    assert rows[path]["indexed_status"] == "ready"
+
+    # 不存在的笔记 → 404
+    assert c.post("/api/kb/notes/exclude", json={"path": "不存在.md"}).status_code == 404
+
+
+def test_whitelist_put_keeps_excluded_list(client):
+    """设置页保存文件夹白名单时不能清掉单篇移出名单（save_many 需按 key 合并）。"""
+    c, _ = client
+    c.post("/api/kb/reindex")
+    c.post("/api/kb/notes/exclude", json={"path": "炬光-振镜温控.md"})
+    c.put("/api/kb/whitelist", json={"folders": ["客户售后问题"]})
+    wl = c.get("/api/kb/whitelist").json()
+    assert wl["folders"] == ["客户售后问题"]
+    assert "炬光-振镜温控.md" in wl["excluded"]
+
+
 def test_stats_endpoint(client):
     c, _ = client
     c.post("/api/kb/reindex")
