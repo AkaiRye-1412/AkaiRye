@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 
-from app.api import backups, config, dashboard, kb, manuals, notes, pdf, projects, rag, system
+from app.api import backups, config, dashboard, kb, manuals, notes, pdf, projects, rag, system, translate
 from app.core import paths
 from app.core.config import runtime
 from app.core.logging import setup_logging
@@ -129,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(manuals.router)
     app.include_router(pdf.router)
     app.include_router(rag.router)
+    app.include_router(translate.router)
     app.include_router(backups.router)
     app.include_router(events.router)  # /ws/events
 

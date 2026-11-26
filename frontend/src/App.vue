@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 应用外壳（对齐 prototype/index.html）：
- * 左侧个人信息卡 + 导航 + Vault 卡 → 顶栏（页面标题 / 全局提问 / 终端 / 新建笔记）
+ * 左侧个人信息卡 + 导航 + Vault 卡 → 顶栏（页面标题 / 终端 / 新建笔记）
  * → 主区（路由视图）+ 右侧 C1 RAG 常驻面板（Q-02：所有页面常驻）。
  */
 import { computed, onMounted, watch } from 'vue'
@@ -10,7 +10,6 @@ import { eventsSocket } from '@/api/ws'
 import { useConfigStore } from '@/stores/config'
 import { useRagStore } from '@/stores/rag'
 import { useUiStore } from '@/stores/ui'
-import GlobalAsk from '@/components/GlobalAsk.vue'
 import Icon from '@/components/Icon.vue'
 import RagPanel from '@/rag/RagPanel.vue'
 import { USER_NAME } from '@/utils/profile'
@@ -51,8 +50,7 @@ const vaultOk = computed(() => !!configStore.status?.vault_root_valid)
 const configOk = computed(() => !!configStore.status?.config_complete)
 const indexedCount = computed(() => configStore.status?.counts?.notes ?? 0)
 
-// ---- 全局提问（FR-HOME-02）：由 GlobalAsk 组件承载，Ctrl+K 聚焦 ----
-// 首页把提问框移到看板内（时效提醒上方），顶栏在首页不再重复展示。
+// 首页铺满到窗口底（与知识助手面板底边齐平），主区不保留底部内边距。
 const isHome = computed(() => route.name === 'home')
 
 function newNote() {
@@ -151,7 +149,7 @@ watch(
           >
             数据外传说明
           </button>
-          <button class="side-link" @click="ui.toast('info', 'Ctrl+K 聚焦全局提问')">
+          <button class="side-link" @click="ui.toast('info', '编辑器中 Ctrl+S 保存笔记')">
             快捷键
           </button>
         </div>
@@ -165,8 +163,6 @@ watch(
           <span class="crumb">售后工作台</span>
           <span class="page-name">{{ pageName }}</span>
         </div>
-
-        <GlobalAsk v-if="!isHome" />
 
         <div class="topbar-actions">
           <button class="btn ghost" @click="router.push('/terminal')">

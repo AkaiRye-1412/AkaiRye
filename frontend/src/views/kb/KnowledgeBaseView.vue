@@ -81,6 +81,16 @@ const groups = computed<Group[]>(() => {
     .sort((a, b) => (a.name === '售后卡片' ? -1 : b.name === '售后卡片' ? 1 : a.name.localeCompare(b.name)))
 })
 
+/** 折叠的分组名（默认全部展开，仅本页内存态） */
+const collapsedGroups = ref<Set<string>>(new Set())
+
+function toggleGroup(name: string) {
+  const next = new Set(collapsedGroups.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  collapsedGroups.value = next
+}
+
 const filters: { key: '' | 'ready' | 'pending' | 'failed' | 'excluded'; label: string; n: number }[] = [
   { key: '', label: '全部', n: 0 },
   { key: 'ready', label: '已索引', n: 0 },
@@ -395,57 +405,71 @@ onUnmounted(() => {
 
       <div class="kb-list" :class="{ loading: loadNotes }">
         <template v-for="g in groups" :key="g.name">
-          <div class="kb-group">
+          <button
+            class="kb-group"
+            type="button"
+            :aria-expanded="!collapsedGroups.has(g.name)"
+            :title="collapsedGroups.has(g.name) ? '展开分组' : '折叠分组'"
+            @click="toggleGroup(g.name)"
+          >
+            <Icon
+              name="chevronRight"
+              :size="12"
+              class="kb-chev"
+              :class="{ folded: collapsedGroups.has(g.name) }"
+            />
             <Icon name="folder" :size="12" />
             <span>{{ g.name }}</span>
             <em>{{ g.items.length }}</em>
-          </div>
-          <div v-for="n in g.items" :key="n.path" class="kb-row" :class="{ off: n.indexed_status === 'excluded' }">
-            <div class="kr-main">
-              <div class="kr-title">
-                {{ titleOf(n) }}
-                <span v-if="n.head_ok === 0" class="kr-flag" title="缺少头部字段（name/status 等）">缺头</span>
+          </button>
+          <template v-if="!collapsedGroups.has(g.name)">
+            <div v-for="n in g.items" :key="n.path" class="kb-row" :class="{ off: n.indexed_status === 'excluded' }">
+              <div class="kr-main">
+                <div class="kr-title">
+                  {{ titleOf(n) }}
+                  <span v-if="n.head_ok === 0" class="kr-flag" title="缺少头部字段（name/status 等）">缺头</span>
+                </div>
+                <div class="kr-sub" :title="n.path">
+                  {{ n.display_name }}<template v-if="n.customer"> · {{ n.customer }}</template>
+                </div>
               </div>
-              <div class="kr-sub" :title="n.path">
-                {{ n.display_name }}<template v-if="n.customer"> · {{ n.customer }}</template>
+              <div class="kr-status">
+                <span class="badge kb-badge" :class="statusOf(n).cls" :title="n.last_error || statusOf(n).label">
+                  {{ statusOf(n).label }}
+                </span>
+              </div>
+              <div class="kr-chunks">{{ n.chunks || '—' }}</div>
+              <div class="kr-date">{{ n.updated_date || '—' }}</div>
+              <div class="kr-acts">
+                <button
+                  v-if="n.indexed_status === 'excluded'"
+                  class="kr-act"
+                  title="恢复到知识库（重新切块索引）"
+                  :disabled="actingPath === n.path"
+                  @click="toggleExcluded(n)"
+                >
+                  <Icon name="plusCircle" :size="13" />
+                </button>
+                <button
+                  v-else
+                  class="kr-act remove"
+                  title="移出知识库（只删索引，不删除笔记文件）"
+                  :disabled="actingPath === n.path"
+                  @click="toggleExcluded(n)"
+                >
+                  <Icon name="minusCircle" :size="13" />
+                </button>
+                <button
+                  class="kr-act"
+                  title="重建这篇的索引"
+                  :disabled="actingPath === n.path"
+                  @click="reindexOne(n)"
+                >
+                  <Icon name="refresh" :size="13" />
+                </button>
               </div>
             </div>
-            <div class="kr-status">
-              <span class="badge kb-badge" :class="statusOf(n).cls" :title="n.last_error || statusOf(n).label">
-                {{ statusOf(n).label }}
-              </span>
-            </div>
-            <div class="kr-chunks">{{ n.chunks || '—' }}</div>
-            <div class="kr-date">{{ n.updated_date || '—' }}</div>
-            <div class="kr-acts">
-              <button
-                v-if="n.indexed_status === 'excluded'"
-                class="kr-act"
-                title="恢复到知识库（重新切块索引）"
-                :disabled="actingPath === n.path"
-                @click="toggleExcluded(n)"
-              >
-                <Icon name="plusCircle" :size="13" />
-              </button>
-              <button
-                v-else
-                class="kr-act remove"
-                title="移出知识库（只删索引，不删除笔记文件）"
-                :disabled="actingPath === n.path"
-                @click="toggleExcluded(n)"
-              >
-                <Icon name="minusCircle" :size="13" />
-              </button>
-              <button
-                class="kr-act"
-                title="重建这篇的索引"
-                :disabled="actingPath === n.path"
-                @click="reindexOne(n)"
-              >
-                <Icon name="refresh" :size="13" />
-              </button>
-            </div>
-          </div>
+          </template>
         </template>
 
         <div v-if="!filtered.length" class="kb-empty">
@@ -599,15 +623,26 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 5px;
+  width: 100%;
   padding: 7px 14px 5px;
+  font-family: inherit;
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.2px;
+  text-align: left;
   color: var(--blue-ink);
   background: #f4f8fe;
+  border: 0;
   border-top: 1px solid #e4edfb;
   border-bottom: 1px solid #eff5fd;
+  cursor: pointer;
+  appearance: none;
+  transition: background 0.12s;
 }
+.kb-group:hover { background: #eaf2fd; }
+.kb-group:focus-visible { outline: 2px solid var(--blue-line); outline-offset: -2px; }
+.kb-chev { flex: none; transform: rotate(90deg); transition: transform 0.15s ease; }
+.kb-chev.folded { transform: rotate(0deg); }
 .kb-group svg { color: var(--blue); opacity: 0.7; }
 .kb-group em {
   font-style: normal;

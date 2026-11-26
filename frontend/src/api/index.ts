@@ -148,6 +148,32 @@ export const ragApi = {
   citations: (id: number) => http.get<RagCitation[]>(`/api/rag/citations/${id}`),
 }
 
+export interface TranslateSense {
+  pos: string
+  meaning: string
+  tag: string
+  scene: string
+  examples: { src: string; dst: string }[]
+}
+
+export interface TranslateResult {
+  translation: string
+  /** word = 单词/短语（按场景列义项）；sentence = 句子/段落（分点讲解） */
+  mode: 'word' | 'sentence'
+  senses: TranslateSense[]
+  points: { label: string; text: string }[]
+  tips: string
+  /** 结构化讲解压成的 Markdown，便于复制/兜底展示 */
+  explanation: string
+  direction: 'en-zh' | 'zh-en'
+  model: string
+}
+
+export const translateApi = {
+  run: (body: { text: string; direction: 'auto' | 'en-zh' | 'zh-en' }) =>
+    http.post<TranslateResult>('/api/translate', body),
+}
+
 export const backupApi = {
   list: () => http.get<Record<string, any>[]>('/api/backups'),
   create: () => http.post<Record<string, any>>('/api/backups'),

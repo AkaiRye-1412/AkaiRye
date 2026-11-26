@@ -314,8 +314,9 @@ kbd {
 .workspace { flex: 1; min-height: 0; display: flex; position: relative; }
 /* 主区 : 知识助手 = 3 : 2（面板展开时按 workspace 剩余宽度等比分配，收起时恢复窄轨） */
 .main { flex: 3 1 0; min-width: 0; overflow: auto; background: var(--bg); padding: 16px 18px 30px; position: relative; }
-/* 首页：去掉底部内边距，让最后一屏卡片底边与右侧面板底边同一条水平线 */
-.main.main-flush { padding-bottom: 0; }
+/* 首页：整屏定高（页面自己 flex 分配高度，项目卡底边与右侧面板底边齐平），
+   底部不留内边距、主区不整体滚动，改由卡片内部滚动 */
+.main.main-flush { padding-bottom: 0; overflow: hidden; display: flex; flex-direction: column; }
 .rag-dock {
   flex: 2 1 0;
   width: auto;

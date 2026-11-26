@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 版本 | v1.1（2026-11-25 评审整改：新增 edit_conflict 错误码、manual 状态 8 态对齐） |
+| 版本 | v1.2（2026-11-26 新增 llm_not_configured 错误码：翻译等 LLM 功能未配置时引导设置页） |
 | 创建日期 | 2026-11-25 |
 | 适用范围 | 本项目全部 REST 接口与 WebSocket 事件契约的设计、实现与变更 |
 | 上游依据 | 《02.整体架构设计.md》v1.0（D1~D13，含"WebSocket 为主"选型与"接入层仅监听 127.0.0.1"约束）；《03.数据库设计.md》；《项目需求文档.md》v1.1 |
@@ -69,6 +69,7 @@
 | `state_conflict` | 409 | 状态机不允许的操作（如对 ready 手册重试、对排队中任务再次入库） |
 | `head_invalid` | 422 | 笔记头部字段不完整（保存仍允许，返回警告；仅整理向导相关接口按需阻塞） |
 | `config_invalid` | 422 | 配置值校验失败（Pydantic） |
+| `llm_not_configured` | 400 | 需要 LLM 的功能被调用，但 `config.llm` 的 base_url/model 未配置（前端据此引导到设置页） |
 | `path_outside_root` | 400 | 请求路径越出配置根目录（防目录穿越，安全项） |
 | `model_error` | 502 | 云端 LLM/Embedding 调用失败（含超时、鉴权失败，detail 区分） |
 | `parse_error` | 500 | MinerU 解析失败（入库任务 error 字段同步记录） |
@@ -99,3 +100,4 @@
 |---|---|---|
 | v1.0 | 2026-11-25 | 首次创建：通用约定、REST/WS 规范、topic 枚举、错误码、脱敏与路径安全 |
 | v1.1 | 2026-11-25 | 评审整改：新增 `edit_conflict` 错误码（FR-NOTE-05 冲突保存）；manual 状态枚举对齐为 8 态（Q-15，新增 discovered） |
+| v1.2 | 2026-11-26 | 新增 `llm_not_configured` 错误码（翻译卡片等依赖 LLM 的功能在未配置时返回 400，前端引导设置页） |

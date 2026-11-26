@@ -9,8 +9,9 @@
  * 数据来源（FR-DASH-07，本页不写统计口径）：
  * - summary ← /api/dashboard/summary（进度 / 合计 / 平均处理天数 / 客户分布）
  * - trend   ← /api/dashboard/trend（FR-DASH-05 三档，Q-06）
- * - follow-ups ← /api/dashboard/follow-ups（FR-DASH-04/06 时效与待跟进）
+ * - follow-ups ← /api/dashboard/follow-ups（FR-DASH-06 待跟进标记）
  * - 项目列表 ← /api/projects（FR-PROJ-01，一项目一笔记）
+ * - 翻译     ← /api/translate（英中双向翻译 + 中文讲解，复用 LLM 配置）
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -20,8 +21,10 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
 echarts.use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
-import { dashboardApi, eventsSocket, projectsApi } from '@/api'
-import GlobalAsk from '@/components/GlobalAsk.vue'
+import { dashboardApi, eventsSocket, projectsApi, translateApi } from '@/api'
+import type { TranslateResult } from '@/api'
+import { ApiError } from '@/api/http'
+import { renderMarkdown } from '@/rag/md'
 import { useConfigStore } from '@/stores/config'
 import { USER_NAME } from '@/utils/profile'
 
@@ -70,6 +73,76 @@ const expanded = ref<Record<string, boolean>>({}) // 客户分组默认折叠（
 const loading = ref(false)
 const refreshing = ref(false)
 const errorMsg = ref('')
+
+// ---- 英中翻译（替代原「时效提醒」区块） ----
+// 方向固定自动识别（不再提供手动切换），输入后回车即翻译。
+const trText = ref('')
+const trLoading = ref(false)
+const trError = ref('')
+const trErrorCode = ref('')
+const trCopied = ref(false)
+const trResult = ref<TranslateResult | null>(null)
+let trCopyTimer: ReturnType<typeof setTimeout> | null = null
+
+const trDirLabel = computed(() =>
+  trResult.value?.direction === 'zh-en' ? '中 → 英' : '英 → 中',
+)
+
+/** 词条模式（按场景列义项）还是句子模式（分点讲解）。 */
+const trIsWord = computed(() => trResult.value?.mode === 'word' && !!trResult.value.senses.length)
+
+async function runTranslate() {
+  const text = trText.value.trim()
+  if (!text || trLoading.value) return
+  trLoading.value = true
+  trError.value = ''
+  trErrorCode.value = ''
+  try {
+    trResult.value = await translateApi.run({ text, direction: 'auto' })
+    // 看板高度受限时卡片内部会滚动：把翻译区顶端对齐到卡片可视区顶部，
+    // 保证用完后输入框和译文都在视线里（用 scrollTop 精确对齐，避免残留半截图表）
+    // 等两帧让结果区完成布局（图表 resize 会带一次回流），再精确对齐滚动位置
+    await nextTick()
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+    const card = document.querySelector('.dash-card') as HTMLElement | null
+    const block = document.querySelector('.trans-block') as HTMLElement | null
+    if (card && block && card.scrollHeight > card.clientHeight) {
+      card.scrollTop += Math.round(block.getBoundingClientRect().top - card.getBoundingClientRect().top)
+    }
+  } catch (e) {
+    trResult.value = null
+    trError.value = (e as Error).message || '翻译失败'
+    trErrorCode.value = e instanceof ApiError ? e.code : ''
+  } finally {
+    trLoading.value = false
+  }
+}
+
+/** 回车直接翻译；输入法组词中的回车不拦截，Shift+Enter 仍可换行。 */
+function onTransEnter(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return
+  e.preventDefault()
+  runTranslate()
+}
+
+async function copyTranslation() {
+  if (!trResult.value) return
+  try {
+    await navigator.clipboard.writeText(trResult.value.translation)
+    trCopied.value = true
+    if (trCopyTimer) clearTimeout(trCopyTimer)
+    trCopyTimer = setTimeout(() => (trCopied.value = false), 1200)
+  } catch {
+    trCopied.value = false
+  }
+}
+
+function clearTranslate() {
+  trText.value = ''
+  trResult.value = null
+  trError.value = ''
+  trErrorCode.value = ''
+}
 
 // ---- 日期展示工具（仅展示，不重算统计口径） ----
 function parseDay(value: string | null | undefined): Date | null {
@@ -143,8 +216,7 @@ const followUpMap = computed(() => {
   return map
 })
 
-/** 时效提醒：未更新天数倒序（越久越靠前，FR-DASH-04）。 */
-const agingList = computed(() => [...followUps.value].sort((a, b) => b.days - a.days))
+/** 时效提醒已取消：follow-ups 仅用于项目列表的「N 天未更新」标记。 */
 
 const groupedProjects = computed(() => {
   const map = new Map<string, ProjectRow[]>()
@@ -337,6 +409,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   window.clearTimeout(refreshTimer)
   if (clockTimer) clearInterval(clockTimer)
+  if (trCopyTimer) clearTimeout(trCopyTimer)
   trendObserver?.disconnect()
   trendObserver = null
   trendChart?.dispose()
@@ -357,7 +430,7 @@ onBeforeUnmount(() => {
 
     <template v-else-if="summary">
       <!-- ============ 数据看板（FR-DASH） ============ -->
-      <section class="card dash-card">
+      <section class="card dash-card" :class="{ 'tr-open': !!trResult }">
         <header class="dash-greet">
           <div class="greet-main">
             <h2 class="greet-title">{{ greeting }}，{{ USER_NAME }}</h2>
@@ -438,31 +511,98 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- 全局提问（从顶栏移入看板：位于时效提醒上方，顺手就能问当前看板看到的东西） -->
-        <div class="ask-slot">
-          <GlobalAsk inline />
-        </div>
-
-        <!-- 时效提醒（FR-DASH-04） -->
-        <div class="aging-block">
-          <div class="aging-head">
-            <h3><span class="aging-ic">⏱</span>时效提醒</h3>
-            <span>
-              平均处理 {{ summary.avg_handle_days ?? '—' }} 天 · 阈值 {{ summary.follow_up_days }} 天
-            </span>
+        <!-- 英中翻译（替代原「时效提醒」区块） -->
+        <div class="trans-block">
+          <div class="trans-head">
+            <h3><span class="trans-ic">译</span>英中翻译<em>译文 + 讲解</em></h3>
           </div>
-          <div v-if="agingList.length" class="aging-list">
-            <button v-for="f in agingList" :key="f.path" class="aging-row" @click="openNote(f.path)">
-              <span class="aging-days">{{ f.days }} 天</span>
-              <span class="aging-main">
-                <strong>{{ f.customer || '（未知客户）' }} · {{ f.project_name || '（未命名项目）' }}</strong>
-                <em>最近更新 {{ fullDate(f.updated_date) }} · 状态进行中</em>
+
+          <div class="trans-input">
+            <textarea
+              v-model="trText"
+              rows="2"
+              maxlength="5000"
+              placeholder="粘贴英文或中文，自动识别方向…"
+              @keydown.enter.exact="onTransEnter"
+            />
+            <div class="trans-bar">
+              <span class="trans-count">
+                {{ trText.length }} / 5000
+                <span class="trans-kbd">Enter</span>
               </span>
-              <span class="aging-go">›</span>
+              <div class="trans-btns">
+                <button v-if="trText || trResult" class="link-btn" @click="clearTranslate">清空</button>
+                <button class="btn primary sm" :disabled="!trText.trim() || trLoading" @click="runTranslate">
+                  {{ trLoading ? '翻译中…' : '翻译并解释' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="trError" class="trans-error">
+            <span>{{ trError }}</span>
+            <button
+              v-if="trErrorCode === 'llm_not_configured'"
+              class="link-btn"
+              @click="router.push('/settings')"
+            >
+              去设置 →
             </button>
           </div>
-          <div v-else class="aging-empty">
-            <span class="ok-mark">✓</span> 所有进行中项目都在 {{ summary.follow_up_days }} 天内有过更新
+
+          <div v-if="trResult" class="trans-result">
+            <div class="trans-result-head">
+              <span class="trans-tag">{{ trDirLabel }}</span>
+              <span class="trans-model" :title="trResult.model">{{ trResult.model }}</span>
+              <button class="link-btn trans-copy" @click="copyTranslation">
+                {{ trCopied ? '已复制' : '复制译文' }}
+              </button>
+            </div>
+            <div class="trans-body">
+              <p class="trans-text">{{ trResult.translation }}</p>
+
+              <!-- 讲解（参考有道词典：单词按场景列义项，句子分点讲解） -->
+              <div v-if="trIsWord" class="trans-explain">
+                <div class="trans-explain-title">释义 · 按场景</div>
+                <div class="sense-list">
+                  <div v-for="(s, i) in trResult.senses" :key="i" class="sense">
+                    <div class="sense-head">
+                      <span class="sense-meaning">{{ s.meaning }}</span>
+                      <span v-if="s.pos" class="sense-pos">{{ s.pos }}</span>
+                      <span v-if="s.tag" class="sense-tag">{{ s.tag }}</span>
+                    </div>
+                    <p v-if="s.scene" class="sense-scene">{{ s.scene }}</p>
+                    <ul v-if="s.examples.length" class="sense-egs">
+                      <li v-for="(eg, j) in s.examples" :key="j">
+                        <span class="eg-src">{{ eg.src }}</span>
+                        <span class="eg-arrow">→</span>
+                        <span class="eg-dst">{{ eg.dst }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+                <p v-if="trResult.tips" class="trans-tip">{{ trResult.tips }}</p>
+              </div>
+
+              <div v-else-if="trResult.points.length || trResult.tips" class="trans-explain">
+                <div class="trans-explain-title">讲解</div>
+                <div class="point-list">
+                  <div v-for="(p, i) in trResult.points" :key="i" class="point">
+                    <span class="point-label">{{ p.label }}</span>
+                    <span class="point-text">{{ p.text }}</span>
+                  </div>
+                </div>
+                <p v-if="trResult.tips" class="trans-tip">{{ trResult.tips }}</p>
+              </div>
+
+              <div v-else-if="trResult.explanation" class="trans-explain">
+                <div class="trans-explain-title">讲解</div>
+                <div class="trans-md" v-html="renderMarkdown(trResult.explanation)" />
+              </div>
+            </div>
+          </div>
+          <div v-else-if="!trLoading" class="trans-empty">
+            支持英文 ⇄ 中文：单词按场景列释义，句子给术语、语法与语气讲解。
           </div>
         </div>
       </section>
@@ -581,13 +721,37 @@ onBeforeUnmount(() => {
   /* 不再限宽居中：知识助手收起后内容区直接铺满，只保留 .main 的左右 18px 边距
      （与卡片间距 14px 同量级，视觉上不空也不贴边） */
   min-width: 0;
-  /* 内容不足一屏时撑满主区：项目卡被拉到底，底边与右侧知识助手面板齐平 */
-  min-height: 100%;
-}
-.dash-card { flex: none; }
-/* 项目卡吃掉剩余高度，内部列表滚动、底部状态栏钉在卡片底 */
-.projects-card {
+  /* 首页整屏定高（.main-flush 为 flex 容器）：项目卡永远贴住窗口底，
+     底边与右侧知识助手面板同一条水平线，不随内容多少上下浮动 */
   flex: 1 1 auto;
+  min-height: 0;
+  /* 正常高度下内容正好铺满（项目卡底边 = 知识助手底边）；
+     窗口过矮时整体滚动兜底，避免把卡片内容切成半行 */
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* 看板区吃掉除项目卡以外的全部高度；内部按「图表让位、翻译优先」分配：
+   窗口变矮时先压图表，翻译输入/结果保持可见；实在放不下才整卡滚动 */
+/* 看板按内容取自然高度：图表固定高度，剩余空间给下方的项目卡。
+   不做卡内滚动——否则矮窗口会把客户分布切成半行，视觉上像坏了 */
+.dash-card {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+.dash-card .dash-greet,
+.dash-card .stat-row,
+.dash-card .trans-block { flex: none; }
+/* 翻译展开时，月报图表（新增记录 / 客户分布）临时让位给译文：
+   译文再长也不会把「进行中项目」挤出屏幕，项目卡底边始终与知识助手齐平；
+   清空译文后图表原样回来 */
+.dash-card.tr-open .dash-grid { display: none; }
+/* 项目卡吃掉剩余高度（内容多，适合承载弹性空间）：内部列表滚动、底部状态栏钉在卡片底，
+   底边始终等于 .page-home 底边 = 知识助手面板底边 */
+.projects-card {
+  /* basis 必须为 0：项目列表内容很长，用 auto 会让 flex 误判为溢出而先压缩看板 */
+  flex: 1 1 0;
+  min-height: 212px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -641,21 +805,35 @@ onBeforeUnmount(() => {
 .stat-tile.warn .stat-value { color: var(--amber-ink); }
 .stat-sub { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.dash-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 10px; padding: 0 18px 12px; }
+.dash-grid {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 10px;
+  padding: 0 18px 12px;
+  /* 固定高度：图表区不再被拉伸成一大片空白（数据少时尤其明显），
+     高度随窗口在 200-250 之间浮动，保证图表本身可读 */
+  flex: none;
+  height: clamp(212px, 24vh, 262px);
+}
 .chart-card {
   border: 1px solid var(--line-soft);
   border-radius: 11px;
   background: #fcfcfb;
   padding: 11px 13px 8px;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* 图表被压矮时 ECharts canvas 可能还按旧高度绘制，裁掉溢出避免压到下方翻译区 */
+  overflow: hidden;
   /* 定位上下文：卡内空态 .chart-empty 是 inset:0 绝对定位，缺这行会以 .main 为基准铺满主区 */
   position: relative;
 }
 .chart-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
 .chart-head h3 { font-size: 12.5px; font-weight: 600; margin: 0 0 1px; }
 .chart-head span { font-size: 10.5px; color: var(--muted); }
-.trend-box { position: relative; }
-.trend-wrap { width: 100%; height: 200px; margin-top: 2px; }
+.trend-box { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.trend-wrap { width: 100%; height: 100%; min-height: 96px; margin-top: 2px; }
 .chart-empty {
   position: absolute;
   inset: 0;
@@ -673,7 +851,7 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-.hbar-list { display: flex; flex-direction: column; gap: 11px; padding: 10px 2px 4px; }
+.hbar-list { display: flex; flex-direction: column; gap: 11px; padding: 10px 2px 4px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .hbar-row { display: grid; grid-template-columns: 64px 1fr 52px; align-items: center; gap: 8px; }
 .hbar-name { font-size: 11.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hbar-track {
@@ -705,47 +883,148 @@ onBeforeUnmount(() => {
 }
 .hbar-open { font-size: 10px; color: var(--muted); text-align: right; white-space: nowrap; }
 
-/* 全局提问（看板内嵌，时效提醒上方） */
-.ask-slot { padding: 0 18px 10px; }
-
-/* 时效提醒 */
-.aging-block { margin: 2px 18px 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
-.aging-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
-.aging-head h3 { font-size: 12.5px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 5px; }
-.aging-ic { color: var(--amber-ink); }
-.aging-head > span { font-size: 10.5px; color: var(--muted); }
-.aging-list { display: flex; flex-direction: column; gap: 1px; max-height: 232px; overflow-y: auto; }
-.aging-row {
+/* 英中翻译（替代时效提醒） */
+.trans-block { margin: 2px 18px 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.trans-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.trans-head h3 { font-size: 12.5px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 6px; }
+.trans-head h3 em { font-style: normal; font-size: 10px; font-weight: 500; color: var(--muted); }
+.trans-ic {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--blue-soft);
+  border: 1px solid var(--blue-line);
+  color: var(--blue-ink);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.trans-input {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.trans-input:focus-within {
+  border-color: var(--blue-line);
+  box-shadow: 0 0 0 3px rgba(42, 120, 214, 0.08);
+}
+.trans-input textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 66px;
+  max-height: 180px;
+  padding: 9px 11px 4px;
+  border: 0;
+  outline: 0;
+  resize: vertical;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+.trans-input textarea::placeholder { color: var(--muted); }
+.trans-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 8px 7px 11px; }
+.trans-count { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.trans-kbd { border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; background: #fafaf7; font-size: 9px; }
+.trans-btns { display: flex; align-items: center; gap: 8px; }
+.trans-error {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  padding: 7px 9px;
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: 8px;
-  text-align: left;
-  width: 100%;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid #f0c9c4;
+  border-radius: 7px;
+  background: #fdf3f1;
+  color: #a33227;
+  font-size: 11px;
 }
-.aging-row:hover { background: #fffaf0; border-color: var(--amber-line); }
-.aging-days {
+.trans-result { margin-top: 10px; padding: 9px 11px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fcfcfa; }
+/* 译文/讲解随内容自然展开，超出屏幕的高度由看板卡片统一滚动（只保留一层滚动条） */
+.trans-body {
+  padding-right: 4px;
+  margin-top: 1px;
+  /* 结果过长时在区域内滚动（单层，不叠加整页滚动） */
+  max-height: clamp(150px, 24vh, 238px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.trans-body::-webkit-scrollbar { width: 8px; }
+.trans-result-head { display: flex; align-items: center; gap: 7px; }
+.trans-tag {
   flex: none;
-  min-width: 46px;
-  text-align: center;
-  font-size: 10.5px;
+  padding: 1px 5px;
+  border: 1px solid var(--blue-line);
+  border-radius: 4px;
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+  font-size: 9.5px;
   font-weight: 600;
-  color: var(--amber-ink);
-  background: var(--amber-soft);
-  border: 1px solid var(--amber-line);
-  border-radius: 5px;
-  padding: 2px 5px;
-  font-variant-numeric: tabular-nums;
 }
-.aging-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.aging-main strong { font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aging-main em { font-style: normal; font-size: 10px; color: var(--muted); }
-.aging-go { margin-left: auto; color: #b7b3a9; font-size: 15px; }
-.aging-empty { display: flex; align-items: center; gap: 7px; padding: 8px 4px 4px; font-size: 11.5px; color: var(--muted); }
-.ok-mark { color: var(--green); }
+.trans-model { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9.5px; color: var(--muted); }
+.trans-copy { margin-left: auto; }
+.trans-text { margin: 7px 0 0; font-size: 13px; line-height: 1.6; color: var(--ink); white-space: pre-wrap; }
+.trans-explain { margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--line-soft); }
+.trans-explain-title { margin-bottom: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.3px; color: var(--muted); }
+.trans-md { font-size: 11.5px; line-height: 1.62; color: var(--ink-2); }
+.trans-md :deep(p) { margin: 3px 0; }
+.trans-md :deep(ul), .trans-md :deep(ol) { margin: 3px 0; padding-left: 17px; }
+.trans-md :deep(li) { margin: 2px 0; }
+.trans-md :deep(strong) { color: var(--ink); }
+.trans-md :deep(code) { padding: 1px 4px; border-radius: 3px; background: #f1f0ea; font-size: 10.5px; }
+.trans-md :deep(h1), .trans-md :deep(h2), .trans-md :deep(h3), .trans-md :deep(h4) { margin: 6px 0 3px; font-size: 12px; }
+
+/* 词条释义：按场景列义项（参考有道词典） */
+.sense-list { display: flex; flex-direction: column; gap: 7px; }
+.sense { min-width: 0; }
+.sense + .sense { padding-top: 7px; border-top: 1px dashed var(--line-soft); }
+.sense-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.sense-meaning { font-size: 12.5px; font-weight: 650; color: var(--ink); }
+.sense-pos {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+  font-size: 9.5px;
+  line-height: 15px;
+}
+.sense-tag { font-size: 9.5px; color: var(--amber-ink); }
+.sense-scene { margin: 2px 0 0; font-size: 11px; line-height: 1.5; color: var(--muted); }
+.sense-egs { margin: 3px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 1px; }
+.sense-egs li { display: flex; align-items: baseline; gap: 5px; font-size: 11px; line-height: 1.55; color: var(--ink-2); }
+.sense-egs li::before {
+  content: "例：";
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+}
+.eg-src { color: var(--ink-2); }
+.eg-arrow { color: #c0bbb0; font-size: 10px; }
+.eg-dst { color: var(--ink); font-weight: 600; }
+
+/* 句子讲解：标签 + 一句话 */
+.point-list { display: flex; flex-direction: column; gap: 3px; }
+.point { display: flex; gap: 6px; font-size: 11.5px; line-height: 1.6; }
+.point-label { flex: none; font-size: 11px; font-weight: 650; color: var(--blue-ink); }
+.point-text { color: var(--ink-2); }
+
+.trans-tip {
+  margin: 7px 0 0;
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: #f5f6fa;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.trans-empty { margin-top: 8px; font-size: 11px; color: var(--muted); }
 
 /* ============ 项目列表 ============ */
 /* 客户分组默认折叠：卡片头保持常规大小，只有分组体按 expanded 展开 */
@@ -817,6 +1096,22 @@ onBeforeUnmount(() => {
 .error-msg { font-size: 12.5px; color: var(--ink-2); }
 .error-actions { display: flex; gap: 8px; margin-top: 6px; }
 .loading-card { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; }
+
+/* 矮窗口（≈900 及以下的笔记本视口）：收紧纵向留白，
+   保证「看板 + 项目卡」仍能一屏放下，项目卡底边继续与知识助手底边齐平 */
+@media (max-height: 880px) {
+  .page-home { gap: 10px; }
+  .dash-greet { padding: 11px 18px 9px; }
+  .stat-row { gap: 8px; padding-bottom: 10px; }
+  .stat-tile { padding: 9px 12px; gap: 1px; }
+  .dash-grid { height: 200px; }
+  .dash-card.tr-open .trans-body { max-height: 172px; }
+  .hbar-list { gap: 8px; padding: 7px 2px 2px; }
+  .hbar-row { gap: 7px; }
+  .trans-block { margin: 0 18px 10px; padding-top: 9px; }
+  .trans-input textarea { min-height: 58px; }
+  .projects-card { min-height: 176px; }
+}
 
 @media (max-width: 1100px) {
   .dash-grid { grid-template-columns: 1fr; }
