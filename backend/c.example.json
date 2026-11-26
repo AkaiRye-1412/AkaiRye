@@ -1,0 +1,47 @@
+{
+  "_readme": [
+    "配置项结构示例，仅用于说明有哪些可配置项，文件本身不会被程序读取。",
+    "真实配置存在 data/workbench.db 的 config 表里，由「设置」页写入并热生效。",
+    "api_key 字段在这里永远留空：密钥只存在本机 db（db 已被 .gitignore 排除），",
+    "请勿把含真实 api_key 的导出文件提交到仓库。"
+  ],
+  "llm": {
+    "provider": "",
+    "base_url": "",
+    "model": "",
+    "temperature": 0.7,
+    "api_key_masked": "",
+    "api_key_set": false
+  },
+  "embedding": {
+    "mode": "cloud",
+    "provider": "",
+    "model": "",
+    "dim": 1024,
+    "api_key_masked": "",
+    "api_key_set": false
+  },
+  "paths": {
+    "vault_root": "",
+    "notes_folder": "客户售后问题",
+    "pdf_root": "",
+    "code_roots": []
+  },
+  "index.whitelist": {
+    "folders": ["客户售后问题"]
+  },
+  "dashboard": {
+    "follow_up_days": 7,
+    "default_range": "month"
+  },
+  "backup": {
+    "dir": "",
+    "keep": 7
+  },
+  "shortcuts": {
+    "global_ask": "Ctrl+K",
+    "new_note": "Ctrl+N",
+    "terminal": "Ctrl+T",
+    "send": "Enter"
+  }
+}

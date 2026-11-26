@@ -27,6 +27,8 @@ data/logs/
 .env
 .env.*
 !.env.example
+# 配置导出快照：可能含真实 api_key，一律不入库（示例见 backend/c.example.json）
+backend/c.json
 
 # ================= 本机工具缓存（本次重点） =================
 # .workbuddy 是 AI 开发过程目录：tmp 下有调试脚本和 78MB 浏览器 profile，
