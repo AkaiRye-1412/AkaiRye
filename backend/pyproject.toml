@@ -11,6 +11,7 @@ dependencies = [
     "watchdog>=4.0",          # vault 文件监听（FR-NOTE-06）
     "openai>=1.40",           # LLM / Embedding 统一接入（OpenAI 兼容协议）
     "sqlalchemy>=2.0",        # 数据访问层（SQLite）
+    "pymupdf>=1.24",          # PDF 文本解析（M9 · FR-RAG-05）
 ]
 
 [project.optional-dependencies]

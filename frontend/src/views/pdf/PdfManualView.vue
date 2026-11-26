@@ -1,16 +1,30 @@
 <script setup lang="ts">
-import PagePlaceholder from '@/components/PagePlaceholder.vue'
+/**
+ * M9 PDF 手册（FR-RAG-04 / 09 / 12 / 13，Q-03 独立模块）
+ *
+ * 双列布局（与售后笔记一致）：左栏常驻手册列表，点任意一本在右栏内嵌阅读，
+ * 不再弹层——这样查看手册时列表与筛选条件不会丢，可连续翻阅多本对比。
+ * 知识库页里那份仍是 compact 单列 + 弹层（空间小，弹层更合适）。
+ */
+import PdfManuals from '@/components/PdfManuals.vue'
 </script>
 
 <template>
-  <PagePlaceholder
-    title="PDF 手册"
-    module="M9（FR-RAG-04 / 09 / 12 / 13，Q-03 独立模块）"
-    :points="[
-      '浏览 pdf_root 全量 PDF（manual 镜像，含 discovered 未入库，Q-15）',
-      '按文件夹分组 / 品牌（高创/ACS/Agito 自动识别）/ 状态筛选',
-      '点击在页内预览（复用 C2 阅读器，Q-04 双模式）',
-      '未入库一键入库（触发后到 M3 知识库页管理队列）',
-    ]"
-  />
+  <div class="page page-pdf">
+    <PdfManuals split />
+  </div>
 </template>
+
+<style scoped>
+.page-pdf {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+.page-pdf :deep(.pdf-wrap) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+</style>

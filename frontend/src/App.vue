@@ -71,7 +71,10 @@ onMounted(() => {
 watch(
   () => route.path,
   (p) => {
-    if (!p.startsWith('/notes') && (rag.context.notePath || rag.context.customer || rag.context.project)) {
+    if (
+      !p.startsWith('/notes') &&
+      (rag.context.notePath || rag.context.noteTitle || rag.context.customer || rag.context.project)
+    ) {
       rag.clearContext()
     }
   },

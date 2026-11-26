@@ -12,6 +12,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { eventsSocket, kbApi, type IndexProgress, type KbNote, type KbStats } from '@/api'
 import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
+import PdfManuals from '@/components/PdfManuals.vue'
 
 const ui = useUiStore()
 
@@ -484,6 +485,9 @@ onUnmounted(() => {
         <span class="foot-dot" />索引构建在本地完成，只把笔记切块文本发送到云端 embedding
       </footer>
     </section>
+
+    <!-- ==================== PDF 手册（M9 手册侧：解析入库 + 队列状态） ==================== -->
+    <PdfManuals compact />
   </div>
 </template>
 

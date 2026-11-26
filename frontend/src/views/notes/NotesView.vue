@@ -244,11 +244,15 @@ async function openNote(path: string) {
     selectedPath.value = path
     applyDetail(info)
     setIndexState(current.value?.indexed_status ?? null)
-    // FR-RAG-18：上报当前笔记上下文，RAG 面板据此自动感知范围
+    // FR-RAG-18：上报当前笔记上下文，RAG 面板据此自动感知范围。两档口径：
+    // - 「当前笔记」= project（项目名；售后卡没有 project 字段，用库里的 project_name，
+    //   它在卡片上回落成日期 20260825，与笔记一一对应，等价于锁定这一篇）
+    // - 「当前项目」= name（客户，如「安图生物」）→ 该客户名下所有笔记
     rag.setContext({
       notePath: path,
+      noteTitle: info.note_title || (info.fields?.title as string) || path.replace(/\.md$/, ''),
       customer: info.fields?.name ?? undefined,
-      project: info.fields?.project ?? undefined,
+      project: (info.fields?.project as string) || current.value?.project_name || undefined,
     })
     if (route.query.path !== path) router.replace({ path: '/notes', query: { path } })
     await nextTick()

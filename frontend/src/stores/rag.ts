@@ -36,14 +36,35 @@ export const useRagStore = defineStore('rag', () => {
   const scopeMode = ref<ScopeMode>('current')
   const lastError = ref('')
 
-  /** 自动感知上下文（FR-RAG-18）：由页面切换/笔记打开时经 context.report 上报。 */
-  const context = ref<{ notePath?: string; customer?: string; project?: string }>({})
+  /**
+   * 自动感知上下文（FR-RAG-18）：由页面切换/笔记打开时经 context.report 上报。
+   * PDF 手册页上报 manualId/manualName，让「当前笔记」这一档在手册页等价于
+   * 「当前手册」——范围提示与检索过滤都跟着这本手册走。
+   */
+  const context = ref<{
+    notePath?: string
+    /** 笔记标题（= note_title），面板上显示「当前笔记：20260825」 */
+    noteTitle?: string
+    customer?: string
+    project?: string
+    manualId?: number
+    manualName?: string
+    manualPage?: number
+    /** 手册是否已入库：false 时面板要提示"检索为空"，否则用户会以为问答坏了 */
+    manualIndexed?: boolean
+  }>({})
 
   function setContext(ctx: typeof context.value, report = true) {
     const snap: typeof context.value = {
       notePath: ctx.notePath || undefined,
+      noteTitle: ctx.noteTitle || undefined,
       customer: ctx.customer || undefined,
       project: ctx.project || undefined,
+      manualId: ctx.manualId || undefined,
+      manualName: ctx.manualName || undefined,
+      manualPage: ctx.manualPage || undefined,
+      // false 是有效值（未入库），不能用 || 兜底吞掉
+      manualIndexed: typeof ctx.manualIndexed === 'boolean' ? ctx.manualIndexed : undefined,
     }
     context.value = snap
     if (report) eventsSocket.reportContext({ ...snap })
@@ -58,8 +79,8 @@ export const useRagStore = defineStore('rag', () => {
   const scopeResolved = computed(() => {
     const c = context.value
     if (scopeMode.value === 'all') return true
-    if (scopeMode.value === 'current') return !!(c.customer || c.project)
-    return !!c.project
+    if (scopeMode.value === 'current') return !!(c.notePath || c.customer || c.project || c.manualId)
+    return !!(c.project || c.customer)
   })
 
   /** 全局提问待办（FR-HOME-02）：RagPanel watch 到即唤起面板并真实发送。 */
@@ -194,12 +215,25 @@ export const useRagStore = defineStore('rag', () => {
     const payload: Record<string, any> = { mode }
     const ctx = context.value
     if (mode === 'current' || mode === 'project') {
-      // 显式带上（未知时传 null）：后端见到这两个键就不再回落到进程级快照，
+      // 显式带上（未知时传 null）：后端见到这些键就不再回落到进程级快照，
       // 保证"面板提示的范围 = 实际检索范围"。
-      payload.customer = mode === 'current' ? ctx.customer ?? null : null
-      payload.project = ctx.project ?? null
-      payload.notePath = ctx.notePath ?? null
+      if (mode === 'current') {
+        // 「当前笔记」= 按 project 算（项目名；售后卡是卡片日期，与笔记一一对应）。
+        // 有 project 就交给后端按 project 过滤；实在没有才退到 notePath 精确匹配。
+        payload.notePath = ctx.project ? null : (ctx.notePath ?? null)
+        payload.customer = null
+        payload.project = ctx.project ?? null
+      } else {
+        // 「当前项目」= 按客户聚合（frontmatter 的 name，如「易高」）：
+        // 一个客户名下常有多张售后卡 + 项目笔记，用户期望的是"这个客户的全部资料"。
+        // 客户缺失时才退到项目名。
+        payload.notePath = null
+        payload.customer = ctx.customer ?? null
+        payload.project = ctx.customer ? null : (ctx.project ?? null)
+      }
     }
+    // PDF 手册页：当前范围就是这一本手册（后端据此只在该 manual 的块里检索）
+    if (mode === 'current' && ctx.manualId) payload.manualId = ctx.manualId
     return payload
   }
 

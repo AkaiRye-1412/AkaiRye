@@ -29,11 +29,13 @@ const menuEl = ref<HTMLElement | null>(null)
 const sessOpen = ref(false)
 const sessEl = ref<HTMLElement | null>(null)
 
-const SCOPES: { value: ScopeMode; label: string }[] = [
-  { value: 'current', label: '当前笔记' },
+// 在 PDF 手册页打开某本手册时，「当前笔记」这一档实际指向的是这本手册（PdfManuals
+// 会上报 manualId），标签跟着换，否则面板显示"当前笔记"却没有任何笔记，容易误会。
+const SCOPES = computed<{ value: ScopeMode; label: string }[]>(() => [
+  { value: 'current', label: rag.context.manualId ? '当前手册' : '当前笔记' },
   { value: 'project', label: '当前项目' },
   { value: 'all', label: '全部' },
-]
+])
 
 const EXAMPLES = [
   '星河纸业的张力问题怎么处理的？',
@@ -236,9 +238,28 @@ const scopeHint = computed(() => {
   const c = rag.context
   if (rag.scopeMode === 'all') return { text: '检索全部已索引笔记与文件夹', warn: false }
   if (rag.scopeMode === 'project') {
-    return c.project
-      ? { text: `本项目：${c.project}`, warn: false }
+    // 「当前项目」按客户（name）聚合：该客户名下的卡片与项目笔记都会纳入
+    const name = c.customer || c.project
+    return name
+      ? { text: `本项目：${name}`, warn: false }
       : { text: '未感知到项目，已按全库检索', warn: true }
+  }
+  // 手册页：current 档就是这一本 PDF（后端按 manualId 过滤，不会混进笔记块）
+  if (c.manualName) {
+    if (c.manualIndexed === false) {
+      return { text: `《${c.manualName}》尚未入库，检索为空`, warn: true }
+    }
+    return {
+      text: `当前手册《${c.manualName}》`,
+      warn: false,
+    }
+  }
+  // 笔记页：「当前笔记」= 笔记标题，后面挂客户/项目便于确认范围
+  const note = c.noteTitle || c.notePath?.replace(/\.md$/i, '')
+  if (note) {
+    // 项目型笔记的标题常与项目名同名（玻璃切割），去重避免「玻璃切割 · 易高 · 玻璃切割」
+    const sub = [c.customer, c.project].filter((x) => x && x !== note).join(' · ')
+    return { text: `当前笔记：${note}${sub ? ` · ${sub}` : ''}`, warn: false }
   }
   const parts = [c.customer && `客户 ${c.customer}`, c.project && `项目 ${c.project}`].filter(Boolean)
   return parts.length
@@ -247,10 +268,26 @@ const scopeHint = computed(() => {
 })
 
 /** 点来源标签跳转：优先落到仍有效的引用所指向的笔记。 */
+/**
+ * 引用跳转（FR-RAG-24）：
+ * - 笔记来源 → 打开工作台编辑器；
+ * - 手册来源 → 跳 M9 PDF 手册页并直接定位到引用页（#page）。
+ */
 function openCitation(g: CitGroup) {
-  const target =
+  const note =
     g.items.find((c) => c.note_path && c.chunk_valid) || g.items.find((c) => !!c.note_path)
-  if (target?.note_path) openNote(target.note_path)
+  if (note?.note_path) {
+    openNote(note.note_path)
+    return
+  }
+  const manual =
+    g.items.find((c) => c.manual_id && c.chunk_valid) || g.items.find((c) => !!c.manual_id)
+  if (manual?.manual_id) {
+    router.push({
+      path: '/pdf',
+      query: { manual: String(manual.manual_id), page: String(manual.page || 1) },
+    })
+  }
 }
 
 /**
@@ -444,7 +481,7 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
                 v-for="g in groupCitations(m.citations)"
                 :key="g.doc"
                 class="cit"
-                :class="{ link: g.items[0].note_path && g.items.some((c) => c.chunk_valid) }"
+                :class="{ link: (g.items[0].note_path || g.items[0].manual_id) && g.items.some((c) => c.chunk_valid) }"
                 :title="groupTip(g)"
                 @click="openCitation(g)"
               >

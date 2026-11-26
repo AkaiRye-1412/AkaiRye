@@ -17,6 +17,7 @@ from app.core.config import runtime
 from app.core.logging import setup_logging
 from app.db import database, migrations
 from app.services import backup as backup_service
+from app.services import manual_index
 from app.services import rag_service
 from app.services import vault as vault_service_module
 from app.ws import events
@@ -52,6 +53,14 @@ async def lifespan(app: FastAPI):
         if renamed:
             logger.info("会话标题补齐：%d 个默认标题会话已按首条提问命名", renamed)
 
+        # PDF 入库队列恢复（NFR-DATA-04）：上次进程退出时未跑完的任务退回排队
+        recovered = manual_index.recover_on_startup(conn)
+        if recovered:
+            logger.info("PDF 入库队列恢复：%d 个中断任务已重新排队", recovered)
+        queued_ingest = conn.execute(
+            "SELECT COUNT(*) c FROM ingest_task WHERE status='queued'"
+        ).fetchone()["c"]
+
     # vault 文件监听（FR-NOTE-06）：目录未配置/不存在时跳过（设置页会校验提示）
     if vault_service_module.vault_service.start_watch(database.connect):
         logger.info("vault watchdog 已启动")
@@ -68,6 +77,11 @@ async def lifespan(app: FastAPI):
         )
         if started.get("started"):
             logger.info("已排入自动索引补齐任务（后台执行）")
+
+    # 上次未完成的 PDF 入库任务：等索引补齐跑起来后再接上，避免两个 embedding 任务抢限频
+    if queued_ingest:
+        manual_index.start(database.connect)
+        logger.info("已恢复 PDF 入库队列（%d 个任务）", queued_ingest)
 
     # 配置热生效联动：路径配置变更后重挂 watchdog（无需重启服务）
     def _on_config_updated(payload: dict) -> None:

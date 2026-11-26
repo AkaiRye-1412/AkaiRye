@@ -185,6 +185,115 @@ export const manualsApi = {
   meta: (manualId: number) => http.get<Record<string, any>>(`/api/reader/meta/${manualId}`),
 }
 
+/** ---------------- PDF 手册（M9 / M3 手册侧） ---------------- */
+
+export type PdfStatus =
+  | 'discovered'
+  | 'queue'
+  | 'parsing'
+  | 'rebuilding'
+  | 'ready'
+  | 'failed'
+  | 'update'
+  | 'invalid'
+
+export interface PdfManual {
+  id: number
+  path: string
+  rel_path: string
+  folder: string
+  name: string
+  brand: string | null
+  pages: number | null
+  size: number | null
+  status: PdfStatus
+  progress: number | null
+  chunks: number
+  error: string | null
+  model_id: string | null
+  dim: number | null
+  last_parsed_at: string | null
+  updated_at: string
+}
+
+export interface PdfTree {
+  root: string
+  groups: { name: string; items: PdfManual[] }[]
+  total: number
+  brands: string[]
+  counts: Record<string, number>
+  scan: { added: number; updated: number; invalid: number; removed: number; total: number }
+}
+
+/** 入库进度（WS ingest.progress / GET /api/ingest/state） */
+export interface IngestState {
+  running: boolean
+  manual_id: number | null
+  name: string
+  stage: 'queued' | 'parsing' | 'chunking' | 'embedding' | 'writing' | ''
+  progress: number
+  started_at: string | null
+  finished_at: string | null
+  error: string
+}
+
+export interface IngestTask {
+  id: number
+  manual_id: number
+  manual_name: string | null
+  action: 'ingest' | 'rebuild' | 'relocate' | 'remove'
+  status: 'queued' | 'running' | 'done' | 'failed' | 'canceled'
+  progress: number | null
+  error: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export const pdfApi = {
+  /** 目录树（后端顺带做一次增量同步） */
+  tree: () => http.get<PdfTree>('/api/pdf/tree'),
+  rescan: () =>
+    http.post<{ added: number; updated: number; invalid: number; removed: number; total: number }>(
+      '/api/pdf/rescan',
+    ),
+  search: (query = '') => http.get<PdfManual[]>(`/api/pdf/search${query}`),
+  ingest: (manualIds?: number[], action: 'ingest' | 'rebuild' = 'ingest') =>
+    http.post<{ started: boolean; queued: number[]; skipped: number[]; pending: number; reason?: string }>(
+      '/api/manuals/ingest',
+      { manual_ids: manualIds, action },
+    ),
+  rebuild: (manualId: number) =>
+    http.post<{ started: boolean; queued: number[] }>(`/api/manuals/${manualId}/rebuild`),
+  remove: (manualId: number) =>
+    http.delete<{ manual_id: number; deleted_chunks: number }>(`/api/manuals/${manualId}`),
+  ignoreUpdate: (manualId: number) =>
+    http.post<{ status: string }>(`/api/manuals/${manualId}/ignore-update`),
+  tasks: (query = '') => http.get<IngestTask[]>(`/api/ingest/tasks${query}`),
+  state: () => http.get<IngestState>('/api/ingest/state'),
+  meta: (manualId: number) =>
+    http.get<{
+      id: number
+      name: string
+      brand: string | null
+      pages: number | null
+      status: PdfStatus
+      chapters: { title_path: string; page: number; chunks: number }[]
+    }>(`/api/reader/meta/${manualId}`),
+  /**
+   * PDF 文件流地址。fragment 里 Chrome 只认 page（跳页）与 navpanes：
+   * - page=N 跳页（RAG 引用定位）
+   * - navpanes=0 尝试收起书签侧栏（几百条书签的厂商手册会占掉半屏）
+   * 注意 view=Fit / zoom=page-fit 实测被 Chrome 忽略，缩放默认按宽度铺满，
+   * 纵向滚动条无法通过 URL 关掉，只能接受（遮罩方案会遮掉正文，已放弃）。
+   */
+  fileUrl: (manualId: number, page?: number) => {
+    const frag = ['navpanes=0']
+    if (page) frag.unshift(`page=${page}`)
+    return `/api/reader/pdf/${manualId}#${frag.join('&')}`
+  },
+}
+
 
 /** 索引任务进度（M3）：后端进程内状态，running=false 时展示上一次的结果。 */
 export interface IndexProgress {

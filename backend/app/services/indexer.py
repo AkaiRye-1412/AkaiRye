@@ -122,8 +122,11 @@ def is_excluded(conn, rel: str) -> bool:
     return _norm_path(rel) in excluded_paths(conn)
 
 
-def _embed_texts(conn, texts: list[str]) -> list[list[float]] | None:
-    """调用 embedding 接口；未配置返回 None（FTS-only 降级），失败抛异常。"""
+def _embed_texts(conn, texts: list[str], on_batch=None) -> list[list[float]] | None:
+    """调用 embedding 接口；未配置返回 None（FTS-only 降级），失败抛异常。
+
+    `on_batch(done, total)` 可选，供手册入库按批推进进度（笔记侧不传，行为不变）。
+    """
     cfg = _embedding_cfg(conn)
     # 兼容两种保存键名：base_url（代码约定）/ provider（设置页实际写入，2026-11-26 修复）
     base_url = cfg.get("base_url") or cfg.get("provider")
@@ -152,6 +155,8 @@ def _embed_texts(conn, texts: list[str]) -> list[list[float]] | None:
                 )
                 time.sleep(wait)
         out.extend(d.embedding for d in resp.data)
+        if on_batch is not None:
+            on_batch(min(i + batch, len(texts)), len(texts))
         if i + batch < len(texts):
             time.sleep(3.0)  # 批次间节流，规避 429 限频
     return out

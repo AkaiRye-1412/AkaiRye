@@ -47,7 +47,12 @@ def update_context(payload: dict) -> None:
     payload = dict(payload or {})
     if not payload.get("notePath") and payload.get("path"):
         payload["notePath"] = payload["path"]
-    snap = {k: payload.get(k) for k in ("notePath", "customer", "project") if payload.get(k)}
+    # manualId/Name/Page：PDF 手册页上报，让「当前笔记」在手册页落到具体这本 PDF
+    snap = {
+        k: payload.get(k)
+        for k in ("notePath", "customer", "project", "manualId", "manualName", "manualPage")
+        if payload.get(k)
+    }
     with _ctx_lock:
         _latest_context.clear()
         _latest_context.update(snap)
@@ -231,15 +236,41 @@ def _scope_predicate(conn, scope: dict) -> object:
     if mode in ("current", "project") and not explicit:
         ctx = current_context()
         customer, project = ctx.get("customer"), ctx.get("project")
+
+    # PDF 手册页：当前范围 = 这一本手册。优先级高于客户/项目——手册页没有笔记上下文，
+    # 若继续按 customer/project 过滤只会得到空结果。
+    manual_id = scope.get("manualId")
+    if manual_id is None and mode == "current":
+        manual_id = current_context().get("manualId")
+    if manual_id is not None and mode in ("current", "project"):
+        try:
+            mid = int(manual_id)
+        except (TypeError, ValueError):
+            mid = None
+        if mid is not None:
+            return lambda chunk: chunk.get("manual_id") == mid
+
     if mode in ("current", "project") and (not customer and not project):
+        # 无客户/项目可感知 → 再看能不能落到具体某一篇笔记（笔记页的「当前笔记」）
+        note_path = scope.get("notePath")
+        if note_path is None and mode == "current":
+            note_path = current_context().get("notePath")
+        if mode == "current" and note_path:
+            # 「当前笔记」= 这一篇：按 note_path 精确匹配。之前用客户名近似，
+            # 同一客户的其它笔记（如安图生物的 20260825 / 20260904）会一起混进来。
+            return lambda chunk: chunk.get("note_path") == note_path
         # 无上下文可感知 → 等同全库（与前端提示一致；否则会过滤掉全部块）
         return lambda chunk: True
 
     def pred(chunk: dict) -> bool:
         if mode == "brand":
-            # 品牌维度属手册链路（二期）；笔记侧按客户名近似匹配枚举
+            # 手册按 brand 字段精确匹配；笔记侧仍按客户名近似（历史口径）
             brands = scope.get("brands") or []
-            return bool(brands) and chunk.get("customer") in brands
+            if not brands:
+                return False
+            if chunk.get("manual_id"):
+                return chunk.get("manual_brand") in brands
+            return chunk.get("customer") in brands
         # current / project：客户或项目命中即纳入
         if customer and chunk.get("customer") == customer:
             return True
@@ -251,14 +282,22 @@ def _scope_predicate(conn, scope: dict) -> object:
 
 
 def _enrich(conn, rows: list[dict]) -> list[dict]:
-    """附 customer/project（范围过滤与展示需要），来自 note_file。"""
+    """附展示字段：笔记取 customer/project，手册取名称/品牌（引用与提示词都要用）。"""
     paths = {r["note_path"] for r in rows if r["note_path"]}
     info = {}
     for p in paths:
         row = conn.execute("SELECT customer, project_name FROM note_file WHERE path=?", (p,)).fetchone()
         info[p] = (row["customer"], row["project_name"]) if row else (None, None)
+
+    manual_ids = {r["manual_id"] for r in rows if r.get("manual_id")}
+    manuals: dict[int, tuple[str | None, str | None]] = {}
+    for mid in manual_ids:
+        row = conn.execute("SELECT name, brand FROM manual WHERE id=?", (mid,)).fetchone()
+        manuals[mid] = (row["name"], row["brand"]) if row else (None, None)
+
     for r in rows:
         r["customer"], r["project"] = info.get(r["note_path"], (None, None))
+        r["manual_name"], r["manual_brand"] = manuals.get(r.get("manual_id"), (None, None))
     return rows
 
 
@@ -345,7 +384,12 @@ def _compose_user(question: str, chunks: list[dict]) -> str:
     if chunks:
         parts.append("以下是本次知识库检索到的资料片段：\n")
         for i, c in enumerate(chunks, 1):
-            src = c["note_path"] or (f"手册#{c['manual_id']}" if c["manual_id"] else "未知")
+            if c.get("manual_id"):
+                src = f"手册《{c.get('manual_name') or c['manual_id']}》"
+                if c.get("page"):
+                    src += f" 第 {c['page']} 页"
+            else:
+                src = c["note_path"] or "未知"
             title = f" · {c['title_path']}" if c["title_path"] else ""
             parts.append(f"[{i}] 来源：{src}{title}\n{c['content']}\n")
     else:
@@ -390,7 +434,7 @@ def _insert_citations(conn, message_id: int, chunks: list[dict]) -> None:
             "INSERT INTO rag_citation (message_id, seq, source_type, source_name, chapter, page,"
             " snippet, note_path, manual_id, chunk_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (message_id, seq, c["source_type"],
-             c["note_path"] or (f"manual#{c['manual_id']}" if c["manual_id"] else "未知"),
+             c["note_path"] or (c.get("manual_name") or f"手册#{c['manual_id']}" if c["manual_id"] else "未知"),
              c["title_path"], c["page"], c["content"][:200],
              c["note_path"], c["manual_id"], c["id"]),
         )
