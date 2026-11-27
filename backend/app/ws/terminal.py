@@ -125,6 +125,10 @@ async def terminal_ws(ws: WebSocket, tab_id: str) -> None:
                                 ensure_ascii=False,
                             )
                         )
+                        # 内置命令如需真正执行（如 /claude 启动 claude），把 exec 写回 shell
+                        exec_cmd = builtin.get("exec")
+                        if exec_cmd:
+                            pty.write(exec_cmd)
                         continue
                 pty.write(data)
                 continue
