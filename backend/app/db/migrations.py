@@ -76,6 +76,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("迁移 v3 完成（M7 存量整理：cleanup_batch / cleanup_item）")
 
+    if 4 not in applied:
+        conn.executescript(_TERMINAL_V4_SQL)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (4, 'terminal_tab', ?)",
+            (_utcnow(),),
+        )
+        conn.commit()
+        logger.info("迁移 v4 完成（M5 终端：terminal_tab）")
+
 
 # v3：M7 存量整理（03 文档 6 章三期表预留的落位）。
 # - cleanup_item.before_content 保存执行前的完整原文，回滚按字节还原（只写头部 ≠ 只回滚头部：
@@ -119,6 +128,22 @@ CREATE TABLE IF NOT EXISTS cleanup_item (
     UNIQUE (batch_id, path)
 );
 CREATE INDEX IF NOT EXISTS idx_cleanup_item_batch ON cleanup_item (batch_id);
+"""
+
+
+# v4：M5 终端（03 文档 6 章三期表预留的落位）。
+# - 标签元数据（tab_id / cwd / 标题 / 排序）持久化，PTY 进程随标签常驻但仅在内存维护，
+#   重启后标签仍可恢复（重新附着时按 cwd 重启 shell，输出历史按 NFR-DATA-04 允许丢失）；
+# - 关闭运行中标签由前端二次确认后调 DELETE，服务层终止 PTY 再删记录（禁止级联，显式清理）。
+_TERMINAL_V4_SQL = """
+CREATE TABLE IF NOT EXISTS terminal_tab (
+    tab_id     TEXT PRIMARY KEY,
+    cwd        TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    sort       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_terminal_tab_sort ON terminal_tab (sort);
 """
 
 

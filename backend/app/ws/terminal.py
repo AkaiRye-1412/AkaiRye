@@ -1,0 +1,140 @@
+"""终端 PTY 字节流 WS（M5 / FR-TERM · 三期 · 04 文档第 4 章：/ws/terminal/{tab_id}）。
+
+协议（JSON 帧，与 events WS 同源约定）：
+- 客户端 → 服务端：
+    {"type": "input",  "data": "<键盘输入>"}   键入（含 `/` 内置命令拦截）
+    {"type": "resize", "cols": 80, "rows": 24}  窗口尺寸变化
+    {"type": "ping"}                            心跳
+- 服务端 → 客户端：
+    {"type": "output", "data": "<PTY 原始输出文本>"}   shell 输出（含 ANSI 转义）
+    {"type": "builtin", "data": "<内置命令回显>", "cwd": "..."}  内置命令结果（FR-TERM-02）
+    {"type": "cwd",    "cwd": "..."}             当前工作目录（标签标题用）
+    {"type": "pong"}
+    {"type": "exit",   "code": 0}                PTY 进程退出
+
+设计要点：
+- PTY 进程随标签常驻：本 WS 断开不终止 PTY（FR-TERM-04），重连后 attach 回同一进程；
+- 输出历史：进程常驻期间 PTY 输出缓冲由 ConPTY 维护，重连后前端先 REST 拿 cwd 再拉增量；
+  （后端进程重启则输出丢失，符合 NFR-DATA-04「终端会话允许丢失，需提示」）
+- 内置命令拦截（FR-TERM-02）：以 `/` 开头的整行在转发 shell 前先由 manager.resolve_builtin 处理。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import sqlite3
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from app.db import database
+from app.services import terminal as terminal_service
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+async def _pump_pty_output(ws: WebSocket, pty, tab_id: str) -> None:
+    """后台任务：从 PTY 输出队列取数据推送给 WS。
+
+    PTY 读线程常驻（随进程），此处只做「队列 → WS」的转发，非阻塞轮询可被 cancel 干净打断。
+    """
+    while True:
+        data = pty.read_available(timeout=0.05)
+        if data is None:
+            # PTY 已退出
+            try:
+                await ws.send_text(json.dumps({"type": "exit", "code": 0}, ensure_ascii=False))
+            except Exception:  # noqa: BLE001
+                pass
+            break
+        if data:
+            try:
+                await ws.send_text(json.dumps({"type": "output", "data": data}, ensure_ascii=False))
+            except Exception:  # noqa: BLE001 - WS 已断开
+                break
+        await asyncio.sleep(0.02)
+
+
+@router.websocket("/ws/terminal/{tab_id}")
+async def terminal_ws(ws: WebSocket, tab_id: str) -> None:
+    await ws.accept()
+
+    # 标签不存在则拒绝（前端应先用 REST 建标签）
+    tab = terminal_service.manager.get_tab(tab_id)
+    if tab is None:
+        await ws.send_text(json.dumps({"type": "error", "data": "标签不存在，请刷新或重新创建"}, ensure_ascii=False))
+        await ws.close(code=4404)
+        return
+
+    # 附着（必要时启动）PTY —— 进程随标签常驻，断开不终止
+    try:
+        pty = terminal_service.manager.attach(tab_id)
+    except Exception as e:  # noqa: BLE001 - pywinpty 未安装/平台不支持
+        await ws.send_text(
+            json.dumps({"type": "error", "data": f"无法启动本机 shell：{e}"}, ensure_ascii=False)
+        )
+        await ws.close(code=1011)
+        return
+
+    # 首次附着回传 cwd（前端标签标题显示）
+    await ws.send_text(json.dumps({"type": "cwd", "cwd": tab.cwd}, ensure_ascii=False))
+
+    reader_task = asyncio.create_task(_pump_pty_output(ws, pty, tab_id))
+
+    # 内置命令处理需要 db 连接（/cd 持久化 cwd）
+    conn = database.connect()
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            mtype = msg.get("type")
+
+            if mtype == "ping":
+                await ws.send_text(json.dumps({"type": "pong"}))
+                continue
+
+            if mtype == "resize":
+                # ConPTY 尺寸调整：pywinpty 支持 setwinsize；此处按需调用
+                cols = int(msg.get("cols") or 0)
+                rows = int(msg.get("rows") or 0)
+                if cols > 0 and rows > 0:
+                    try:
+                        pty._proc.setwinsize(rows, cols)  # noqa: SLF001 - pywinpty 私有句柄
+                    except Exception:  # noqa: BLE001 - 尺寸调整失败不影响主流程
+                        pass
+                continue
+
+            if mtype == "input":
+                data = msg.get("data", "")
+                # 内置命令拦截（FR-TERM-02）：整行以 / 开头且在输入末尾（回车前）
+                if data.endswith("\r") or data.endswith("\n"):
+                    line = data.rstrip("\r\n")
+                    builtin = terminal_service.manager.resolve_builtin(conn, tab, line)
+                    if builtin and builtin.get("handled"):
+                        await ws.send_text(
+                            json.dumps(
+                                {"type": "builtin", "data": builtin["output"], "cwd": builtin.get("cwd", tab.cwd)},
+                                ensure_ascii=False,
+                            )
+                        )
+                        continue
+                pty.write(data)
+                continue
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:  # noqa: BLE001 - 异常不终止常驻 PTY
+        logger.warning("终端 WS 异常（tab=%s）：%s", tab_id, e)
+    finally:
+        conn.close()
+        reader_task.cancel()
+        # 关键：不 terminate PTY —— 进程随标签常驻（FR-TERM-04）
+        logger.info("终端 WS 断开（tab=%s），PTY 保持运行", tab_id)

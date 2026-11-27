@@ -290,6 +290,29 @@ export const manualsApi = {
   meta: (manualId: number) => http.get<Record<string, any>>(`/api/reader/meta/${manualId}`),
 }
 
+/** ---------------- 终端（M5 / FR-TERM） ---------------- */
+
+export interface TerminalTab {
+  tab_id: string
+  cwd: string
+  title: string
+  sort: number
+  alive: boolean
+  created_at: string
+}
+
+export const terminalApi = {
+  list: () => http.get<TerminalTab[]>('/api/terminal/tabs'),
+  create: (body: { cwd?: string; title?: string } = {}) =>
+    http.post<TerminalTab>('/api/terminal/tabs', body),
+  get: (tabId: string) => http.get<TerminalTab>(`/api/terminal/tabs/${tabId}`),
+  rename: (tabId: string, title: string) =>
+    http.patch<TerminalTab>(`/api/terminal/tabs/${tabId}`, { title }),
+  /** 关闭标签：force=true 表示已二次确认（终止运行中的进程） */
+  close: (tabId: string, force = false) =>
+    http.delete<{ closed: boolean }>(`/api/terminal/tabs/${tabId}?force=${force}`),
+}
+
 /** ---------------- PDF 手册（M9 / M3 手册侧） ---------------- */
 
 export type PdfStatus =

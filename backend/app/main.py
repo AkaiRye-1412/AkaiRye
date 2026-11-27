@@ -23,6 +23,7 @@ from app.api import (
     projects,
     rag,
     system,
+    terminal,
     translate,
 )
 from app.core import paths
@@ -32,8 +33,9 @@ from app.db import database, migrations
 from app.services import backup as backup_service
 from app.services import manual_index
 from app.services import rag_service
+from app.services import terminal as terminal_service
 from app.services import vault as vault_service_module
-from app.ws import events
+from app.ws import events, terminal as terminal_ws
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,8 @@ async def lifespan(app: FastAPI):
     paths.ensure_runtime_dirs()
     migrations.init_db()
     events.broker.bind_loop(asyncio.get_running_loop())
+    with database.get_conn() as tconn:
+        terminal_service.manager.load_from_db(tconn)
 
     # 启动备份补跑（OQ-10 / NFR-DATA-04）：>24h 补一次每日备份
     with database.get_conn() as conn:
@@ -160,7 +164,9 @@ def create_app() -> FastAPI:
     app.include_router(translate.router)
     app.include_router(cleanup.router)
     app.include_router(backups.router)
-    app.include_router(events.router)  # /ws/events
+    app.include_router(terminal.router)
+    app.include_router(events.router)   # /ws/events
+    app.include_router(terminal_ws.router)  # /ws/terminal/{tab_id}
 
     if paths.FRONTEND_DIST.is_dir():
         from fastapi.responses import FileResponse

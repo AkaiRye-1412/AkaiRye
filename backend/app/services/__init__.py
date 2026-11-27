@@ -9,6 +9,7 @@
 - config_service.py 配置管理（Pydantic 校验、热生效事件）（M8）
 - backup.py       每日备份 VACUUM INTO + 7 份轮转（OQ-10）（M8）
 - pdf_scan.py     PDF 根目录扫描 → manual 全量镜像同步（M9，Q-15）
+- terminal.py     终端会话管理（ConPTY 多标签、进程随标签常驻、内置命令）（M5）
 
-三期服务（terminal.py / git_status.py / cleanup.py）在 M5/M6/M7 启动时补充。
+三期服务（git_status.py 等）在 M6 启动时补充。
 """

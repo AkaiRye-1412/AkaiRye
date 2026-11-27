@@ -17,8 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 # 向量检索扩展：sqlite-vec（V1 spike 验证项，见 02 文档 9.2 / 07 风险 R1）
 vec = ["sqlite-vec>=0.1.6"]
-# 终端 PTY：三期引入（FR-TERM）
-pty = ["pywinpty>=2.0"]
+# 终端 PTY：三期引入（FR-TERM，ConPTY）
+pty = ["pywinpty>=3.0"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [build-system]
