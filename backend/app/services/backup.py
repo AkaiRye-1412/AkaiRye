@@ -7,19 +7,47 @@
 
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from app.core import paths
+from app.services.config_service import get_raw
 
 logger = logging.getLogger(__name__)
 
 KEEP_DEFAULT = 7
 
 
+def backup_dir(conn) -> Path:
+    """备份目录：backup.dir 为空时用 data/backups（FR-CFG-09 位置可配）。"""
+    raw = str(get_raw(conn, "backup").get("dir") or "").strip()
+    target = Path(raw).expanduser() if raw else paths.BACKUP_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def keep_count(conn) -> int:
+    """保留份数：backup.keep，异常/空值回退 7（OQ-10）。"""
+    try:
+        return max(1, int(get_raw(conn, "backup").get("keep") or KEEP_DEFAULT))
+    except (TypeError, ValueError):
+        return KEEP_DEFAULT
+
+
 def run_backup(conn, kind: str = "daily") -> dict:
     """执行一次备份并记录 backup_run。"""
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y%m%d_%H%M%S")
-    target = paths.BACKUP_DIR / f"workbench_{kind}_{stamp}.db"
+    try:
+        target_dir = backup_dir(conn)
+        target = target_dir / f"workbench_{kind}_{stamp}.db"
+        # 同一秒内连续两次备份（手动 + 启动补跑）会撞名，VACUUM INTO 不允许覆盖
+        seq = 1
+        while target.exists():
+            seq += 1
+            target = target_dir / f"workbench_{kind}_{stamp}_{seq}.db"
+    except OSError as e:  # 配置了无权限/非法目录：返回失败而不是抛 500
+        logger.error("备份目录不可用：%s", e)
+        return {"kind": kind, "file_path": "", "size": None, "status": "failed", "error": str(e)}
     status, size, error = "ok", None, None
     try:
         conn.execute("VACUUM INTO ?", (str(target),))

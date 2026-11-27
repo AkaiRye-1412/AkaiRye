@@ -10,10 +10,20 @@ export const systemApi = {
   status: () => http.get<SystemStatus>('/api/system/status'),
 }
 
+/** 品牌枚举（FR-RAG-13）：固定枚举 + 可停用，不做自由文本输入 */
+export interface Brand {
+  name: string
+  sort: number
+  enabled: number
+}
+
 export const configApi = {
   getAll: () => http.get<Record<string, any>>('/api/config'),
   save: (patch: Record<string, any>) => http.put<{ saved: string[] }>('/api/config', patch),
-  brands: () => http.get<{ name: string; sort: number; enabled: number }[]>('/api/brands'),
+  brands: () => http.get<Brand[]>('/api/brands'),
+  addBrand: (name: string) => http.post<Brand>('/api/brands', { name }),
+  patchBrand: (name: string, body: { enabled?: boolean; sort?: number }) =>
+    http.patch<Brand>(`/api/brands/${encodeURIComponent(name)}`, body),
   testLlm: (body: { base_url: string; api_key: string; model: string; temperature?: number }) =>
     http.post<{ ok: boolean; latency_ms?: number; model?: string; reply?: string; error?: string }>(
       '/api/config/test-llm',

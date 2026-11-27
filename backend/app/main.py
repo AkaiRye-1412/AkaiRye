@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
         if backup_service.needs_daily_backup(conn):
             logger.info("距上次备份超过 24h，启动时补跑每日备份")
             backup_service.run_backup(conn, kind="daily")
+            backup_service.rotate(conn, backup_service.keep_count(conn))
 
         # 旧会话标题补齐：仍是「新会话」但有历史的，用第一条提问命名（幂等）
         renamed = rag_service.backfill_default_titles(conn)

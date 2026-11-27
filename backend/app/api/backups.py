@@ -20,5 +20,5 @@ def list_backups(conn: Connection = Depends(get_db)) -> list[dict]:
 @router.post("", status_code=201)
 def create_backup(conn: Connection = Depends(get_db)) -> dict:
     result = backup_service.run_backup(conn)
-    backup_service.rotate(conn)
+    backup_service.rotate(conn, backup_service.keep_count(conn))
     return result
