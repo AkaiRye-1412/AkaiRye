@@ -60,7 +60,14 @@ class PtyHandle:
         from winpty import PtyProcess  # pywinpty（FR-TERM，pyproject pty 可选组）
 
         # ConPTY 用 cmd.exe 承载（Windows 默认 shell）
-        self._proc = PtyProcess.spawn("cmd.exe", cwd=cwd)
+        # 注入环境变量，屏蔽 Claude Code 对 NODE_EXTRA_CA_CERTS 里老根证书的红字警告：
+        # - CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_DROP（v2.1.315~324 用）
+        # - CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_ORP（更新版本用）
+        # 两者都设，覆盖各版本；只影响本终端 shell 会话，不影响系统/WorkBuddy 本身。
+        env = dict(os.environ)
+        env["CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_DROP"] = "1"
+        env["CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_ORP"] = "1"
+        self._proc = PtyProcess.spawn("cmd.exe", cwd=cwd, env=env)
         self.pid = self._proc.pid
         # 写缓冲：PtyProcess 非线程安全，写用锁串行化
         self._write_lock = threading.Lock()
@@ -259,20 +266,17 @@ class TerminalManager:
                     "AkaiRye 工作台内置命令：\r\n"
                     "  /help            显示本帮助\r\n"
                     "  /cd <目录>       切换当前标签工作目录\r\n"
-                    "  /claude          忽略证书警告并启动 Claude Code\r\n"
+                    "  /claude          启动 Claude Code\r\n"
                     "其余输入将交给本机 shell 执行。\r\n"
                 ),
                 "cwd": tab.cwd,
             }
         if cmd == "/claude":
-            # 忽略 NODE_EXTRA_CA_CERTS 中的自签名/过期老根证书警告，再启动 claude
+            # 环境变量已在 shell 启动时注入（见 PtyHandle），此处直接启动 claude 即可
             return {
                 "handled": True,
-                "output": (
-                    "已设置 CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_DROP=1，启动 Claude Code…\r\n"
-                    "（本标签 shell 会话内忽略证书警告，不影响其他标签）\r\n"
-                ),
-                "exec": 'set CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_DROP=1&& claude\r',
+                "output": "启动 Claude Code…\r\n",
+                "exec": "claude\r",
                 "cwd": tab.cwd,
             }
         if cmd == "/cd":
