@@ -234,15 +234,21 @@ class TerminalManager:
 
     # ---------- PTY 附着（供 WS 层调用） ----------
 
-    def attach(self, tab_id: str) -> PtyHandle:
-        """取得（必要时启动）标签的 PTY：进程随标签常驻，断开不终止。"""
+    def attach(self, tab_id: str) -> tuple[PtyHandle, bool]:
+        """取得（必要时启动）标签的 PTY：进程随标签常驻，断开不终止。
+
+        返回 (pty, is_new)：is_new=True 表示本次新建了 PTY（首次附着），
+        False 表示复用已有常驻 PTY（重连）。WS 层据此决定是否补发提示符唤醒。
+        """
         tab = self.get_tab(tab_id)
         if tab is None:
             raise KeyError(tab_id)
+        is_new = False
         if tab.pty is None or not tab.pty.isalive():
             tab.pty = PtyHandle(tab.cwd)
+            is_new = True
             logger.info("终端标签 %s 已启动 PTY（pid=%s）", tab_id, tab.pty.pid)
-        return tab.pty
+        return tab.pty, is_new
 
     def alive(self, tab_id: str) -> bool:
         tab = self.get_tab(tab_id)

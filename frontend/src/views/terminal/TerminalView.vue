@@ -57,6 +57,13 @@ async function loadTabs() {
   } finally {
     loading.value = false
   }
+  // loading 已置 false、DOM 已渲染后，确保激活标签的 xterm open + WS 连接
+  // （刷新进入时标签来自 DB，不能只依赖 onHostMounted 回调，需显式激活）
+  await nextTick()
+  const first = tabs.value.find((t) => t.tab.tab_id === activeId.value) ?? tabs.value[0]
+  if (first) {
+    await activate(first)
+  }
 }
 
 function buildRuntime(tab: TerminalTab): TabRuntime {

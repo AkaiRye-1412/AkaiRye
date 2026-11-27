@@ -71,7 +71,7 @@ async def terminal_ws(ws: WebSocket, tab_id: str) -> None:
 
     # 附着（必要时启动）PTY —— 进程随标签常驻，断开不终止
     try:
-        pty = terminal_service.manager.attach(tab_id)
+        pty, is_new = terminal_service.manager.attach(tab_id)
     except Exception as e:  # noqa: BLE001 - pywinpty 未安装/平台不支持
         await ws.send_text(
             json.dumps({"type": "error", "data": f"无法启动本机 shell：{e}"}, ensure_ascii=False)
@@ -81,6 +81,11 @@ async def terminal_ws(ws: WebSocket, tab_id: str) -> None:
 
     # 首次附着回传 cwd（前端标签标题显示）
     await ws.send_text(json.dumps({"type": "cwd", "cwd": tab.cwd}, ensure_ascii=False))
+
+    # 复用已有常驻 PTY（重连）时，补发一个空回车唤醒 shell 提示符，
+    # 避免前端刷新后因 banner/提示符已被上次连接消费而显得"空白"
+    if not is_new:
+        pty.write("\r\n")
 
     reader_task = asyncio.create_task(_pump_pty_output(ws, pty, tab_id))
 
