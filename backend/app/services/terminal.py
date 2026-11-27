@@ -304,7 +304,10 @@ class TerminalManager:
     def _resolve_default_cwd(self, conn, cwd: str | None) -> str:
         if cwd and Path(cwd).is_dir():
             return cwd
-        # 默认取配置的 vault_root（工作台主目录），否则用户 HOME
+        # 默认取用户主目录（HOME），对齐系统 cmd 默认行为；HOME 无效时回退 vault_root
+        home = str(Path.home())
+        if home and Path(home).is_dir():
+            return home
         try:
             row = conn.execute(
                 "SELECT value_json FROM config WHERE key='paths'"
@@ -317,7 +320,7 @@ class TerminalManager:
                     return vault
         except Exception:  # noqa: BLE001 - 配置缺失回退 HOME
             pass
-        return str(Path.home())
+        return home
 
     def _default_title(self, cwd: str) -> str:
         return Path(cwd).name or cwd
