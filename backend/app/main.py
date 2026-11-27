@@ -113,16 +113,28 @@ async def lifespan(app: FastAPI):
             logger.info("路径配置变更：vault watchdog 已重新挂载")
         else:
             logger.warning("路径配置变更：vault watchdog 未启动（目录无效）")
+        # 代码仓库根目录也可能变了，同步重挂仓库 watchdog
+        git_service.stop_watch()
+        if git_service.start_watch(database.connect):
+            logger.info("路径配置变更：代码仓库 watchdog 已重新挂载")
         # 注意：这里不自动排索引任务。路径变更后由前端在设置页保存成功后显式调
         # POST /api/kb/autofill —— 隐式后台任务会与用户随后的操作（单篇重建/白名单调整）
         # 并发写同一个库，SQLite 锁冲突会让同步索引莫名的少索引几篇。
 
-    # 代码仓库定期刷新（FR-GIT-03）：启动即刷一次，此后每 30 分钟自动刷新
+    # 代码仓库定期刷新（FR-GIT-03）：启动即刷一次，此后每 30 分钟兜底刷新
     git_service.start_periodic_refresh(database.connect)
+
+    # 代码仓库 watchdog（FR-GIT-03 增强）：代码有改动（提交/切分支/拉取等）防抖后自动刷新，
+    # 无需用户手动点「刷新」。未配置代码根 / git 不可用 / watchdog 未安装时静默跳过。
+    if git_service.start_watch(database.connect):
+        logger.info("代码仓库 watchdog 已启动：检测到 .git 变更将自动刷新")
+    else:
+        logger.info("代码仓库 watchdog 未启动：未配置代码根或 git 不可用，仍保留 30 分钟轮询兜底")
 
     events.broker.subscribe("config.updated", _on_config_updated)
     yield
     vault_service_module.vault_service.stop_watch()
+    git_service.stop_watch()
     git_service.stop_periodic_refresh()
 
 

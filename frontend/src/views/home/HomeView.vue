@@ -21,12 +21,13 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
 echarts.use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
-import { dashboardApi, eventsSocket, projectsApi, translateApi } from '@/api'
-import type { TranslateResult } from '@/api'
+import { dashboardApi, eventsSocket, projectsApi, reposApi, translateApi } from '@/api'
+import type { GitRepo, TranslateResult } from '@/api'
 import { ApiError } from '@/api/http'
 import { renderMarkdown } from '@/rag/md'
 import { useConfigStore } from '@/stores/config'
 import { USER_NAME } from '@/utils/profile'
+import Icon from '@/components/Icon.vue'
 
 const router = useRouter()
 const configStore = useConfigStore()
@@ -73,6 +74,43 @@ const expanded = ref<Record<string, boolean>>({}) // 客户分组默认折叠（
 const loading = ref(false)
 const refreshing = ref(false)
 const errorMsg = ref('')
+
+// ---- 代码仓库（FR-GIT-06：首页顶部折叠展示，只读） ----
+const repos = ref<GitRepo[]>([])
+const reposLoading = ref(true)
+
+/** 未提交总数（跨全部可见仓库求和，用于卡片头部黄点提示） */
+const repoDirtyTotal = computed(() => repos.value.reduce((s, r) => s + (r.dirty ?? 0), 0))
+
+async function loadRepos() {
+  try {
+    repos.value = await reposApi.list(false)
+  } catch {
+    repos.value = []
+  } finally {
+    reposLoading.value = false
+  }
+}
+
+/** 仓库状态文案（与 ReposView 保持一致） */
+function repoStateText(r: GitRepo): string {
+  if (!r.exists) return '目录缺失'
+  if (r.error) return '读取失败'
+  if (r.dirty) return `${r.dirty} 处未提交`
+  return '干净'
+}
+
+/** 仓库状态配色档位 */
+function repoStateKind(r: GitRepo): 'ok' | 'warn' | 'err' | 'missing' {
+  if (!r.exists) return 'missing'
+  if (r.error) return 'err'
+  if (r.dirty) return 'warn'
+  return 'ok'
+}
+
+function openRepoTerminal(repo: GitRepo) {
+  router.push({ path: '/terminal', query: { cwd: repo.path } })
+}
 
 // ---- 英中翻译（替代原「时效提醒」区块） ----
 // 方向固定自动识别（不再提供手动切换），输入后回车即翻译。
@@ -398,18 +436,25 @@ onMounted(async () => {
   const dr = configStore.config?.dashboard?.default_range
   if (dr === 'month' || dr === '30d' || dr === '6m') range.value = dr
   await refreshAll()
+  void loadRepos() // 仓库状态独立拉取，不阻塞看板渲染
   // 外部修改 → note.changed → 自动刷新（NFR-PERF-04：轻量防抖，不实时全量扫描）
   eventsSocket.on('note.changed', () => {
     window.clearTimeout(refreshTimer)
     refreshTimer = window.setTimeout(refreshAll, 1500)
   })
+  // 代码仓库有改动 → repo.changed → 自动重拉仓库状态（首页仓库条实时更新）
+  offRepoChanged = eventsSocket.on('repo.changed', () => {
+    void loadRepos()
+  })
 })
 
+let offRepoChanged: (() => void) | null = null
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   window.clearTimeout(refreshTimer)
   if (clockTimer) clearInterval(clockTimer)
   if (trCopyTimer) clearTimeout(trCopyTimer)
+  offRepoChanged?.()
   trendObserver?.disconnect()
   trendObserver = null
   trendChart?.dispose()
@@ -604,6 +649,53 @@ onBeforeUnmount(() => {
           <div v-else-if="!trLoading" class="trans-empty">
             支持英文 ⇄ 中文：单词按场景列释义，句子给术语、语法与语气讲解。
           </div>
+        </div>
+      </section>
+
+      <!-- ============ 代码仓库（FR-GIT-06：折叠条，置于进行中项目上方） ============ -->
+      <section class="card repos-card">
+        <header class="card-head">
+          <div class="card-title">
+            <span class="repos-title-ic"><Icon name="git" :size="15" /></span>
+            <h2>代码仓库</h2>
+            <span class="count-pill">{{ repos.length }}</span>
+            <span v-if="repoDirtyTotal" class="repos-dirty-pill">⏳ {{ repoDirtyTotal }} 处未提交</span>
+          </div>
+          <button class="btn ghost sm" @click="router.push('/repos')">全部仓库 ›</button>
+        </header>
+
+        <!-- 加载中 -->
+        <div v-if="reposLoading" class="repos-skeleton">
+          <span>正在读取仓库状态…</span>
+        </div>
+
+        <!-- 未配置 / 无仓库 -->
+        <div v-else-if="!repos.length" class="repos-empty">
+          <span class="repos-empty-ic"><Icon name="git" :size="18" /></span>
+          <span>尚未发现代码仓库，可在「设置 → 代码仓库根目录」配置</span>
+          <button class="link-btn" @click="router.push('/settings')">去设置 ›</button>
+        </div>
+
+        <!-- 仓库列表（横向滚动的紧凑卡片） -->
+        <div v-else class="repos-strip">
+          <button
+            v-for="r in repos"
+            :key="r.path"
+            class="repo-chip"
+            :class="[`st-${repoStateKind(r)}`, { missing: !r.exists }]"
+            @click="openRepoTerminal(r)"
+            :title="r.path"
+          >
+            <span class="repo-chip-head">
+              <span class="repo-state-dot" />
+              <span class="repo-chip-name">{{ r.name }}</span>
+            </span>
+            <span class="repo-chip-branch">
+              <Icon name="git" :size="10" />
+              <code>{{ r.branch || '—' }}</code>
+            </span>
+            <span class="repo-chip-state">{{ repoStateText(r) }}</span>
+          </button>
         </div>
       </section>
 
@@ -1031,6 +1123,119 @@ onBeforeUnmount(() => {
   color: var(--muted);
 }
 .trans-empty { margin-top: 8px; font-size: 11px; color: var(--muted); }
+
+/* ============ 代码仓库折叠条（FR-GIT-06） ============ */
+/* 紧凑展示，不参与 flex 弹性伸缩：只占自然高度，剩余空间仍由项目卡吃掉 */
+.repos-card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+.repos-card .card-head { padding-bottom: 10px; }
+.repos-title-ic {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--violet-soft);
+  color: var(--violet);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.repos-dirty-pill {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--amber-ink);
+  background: rgba(250, 240, 220, 0.5);
+  border: 1px solid var(--amber-line);
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.repos-skeleton {
+  padding: 12px 18px 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.repos-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 18px 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.repos-empty-ic { color: #a6a29a; display: grid; place-items: center; }
+
+/* 仓库横向滚动条：紧凑卡片横排，超出水平滚动 */
+.repos-strip {
+  display: flex;
+  gap: 9px;
+  padding: 0 18px 14px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.repos-strip::-webkit-scrollbar { height: 8px; }
+.repos-strip::-webkit-scrollbar-thumb { background: rgba(180, 177, 168, 0.5); border-radius: 4px; }
+
+.repo-chip {
+  flex: none;
+  min-width: 168px;
+  max-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 11px 10px;
+  border: 1px solid rgba(231, 229, 221, 0.8);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.24);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s, background 0.12s;
+}
+.repo-chip:hover { background: rgba(255, 255, 255, 0.4); border-color: var(--blue-line); }
+.repo-chip.missing { opacity: 0.6; }
+.repo-chip-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.repo-state-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: #c8c4b9; }
+.repo-chip.st-ok .repo-state-dot { background: var(--green); }
+.repo-chip.st-warn .repo-state-dot { background: var(--amber); }
+.repo-chip.st-err .repo-state-dot { background: var(--red); }
+.repo-chip.st-missing .repo-state-dot { background: var(--muted); }
+.repo-chip-name {
+  font-size: 12.5px;
+  font-weight: 620;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.repo-chip-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--ink-2);
+  background: rgba(242, 241, 236, 0.7);
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 100%;
+}
+.repo-chip-branch svg { color: var(--muted); flex: none; }
+.repo-chip-branch code { font-family: var(--mono); font-size: 10.5px; }
+.repo-chip-state { font-size: 10.5px; font-weight: 500; color: var(--ink-2); }
+.repo-chip.st-warn .repo-chip-state { color: var(--amber-ink); }
+.repo-chip.st-err .repo-chip-state { color: var(--red); }
+.repo-chip.st-missing .repo-chip-state { color: var(--muted); }
 
 /* ============ 项目列表 ============ */
 /* 客户分组默认折叠：卡片头保持常规大小，只有分组体按 expanded 展开 */

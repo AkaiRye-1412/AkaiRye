@@ -392,3 +392,181 @@ def start_periodic_refresh(conn_factory) -> None:
 def stop_periodic_refresh() -> None:
     """停止后台刷新（供应用关闭时调用）。"""
     _refresh_stop.set()
+
+
+# ---- watchdog 监听：代码有改动自动刷新（无需手动点「刷新」） ----
+
+# 仓库内触发刷新的路径特征：这些文件/目录的变动才代表仓库状态真的变了
+# （HEAD/ORIG_HEAD 切分支与 reset，index 暂存，refs/ 分支提交，objects/ 内容，
+#  FETCH_HEAD 拉取远端，COMMIT_EDITMSG/MERGE_HEAD 合并状态）。
+# 注意：不含 index.lock —— 那是 `git status` 等只读命令自己短暂创建/删除的锁文件，
+# 监听它会导致「refresh → git status 建锁 → watchdog 捕获锁 → 再 refresh」死循环。
+_GIT_STATE_MARKERS = (
+    "HEAD",
+    "ORIG_HEAD",
+    "FETCH_HEAD",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REBASE_HEAD",
+    "COMMIT_EDITMSG",
+    "index",
+    "refs",
+    "objects",
+    "logs",
+    "packed-refs",
+    "config",
+)
+
+# 仓库状态变更后的刷新防抖（秒）：一次 commit/push 会连环触发多个文件事件，合并成一次刷新
+REPO_WATCH_DEBOUNCE_SECONDS = 2.0
+
+_watch_observer = None
+_watch_timer: "threading.Timer | None" = None
+_watch_lock = threading.Lock()
+_watch_roots: list[str] = []
+_watch_logger = logging.getLogger("workbench.git")
+
+
+def _is_git_state_path(rel: str) -> bool:
+    """判断相对 .git 的路径是否为「影响仓库状态」的路径。
+
+    只监听 .git 内部的状态文件；工作区源码改动（src/*.py 等）不属于仓库状态，
+    不在监听范围——那些需要 commit 后才会反映到 git 状态里。
+    """
+    first = rel.split("/", 1)[0]
+    return first in _GIT_STATE_MARKERS
+
+
+def _refresh_and_notify(conn_factory) -> None:
+    """watchdog 防抖到期后的回调：重新扫描 + 刷新，并广播 repo.changed。"""
+    global _watch_timer
+    with _watch_lock:
+        _watch_timer = None
+    try:
+        from app.ws.events import broker  # 局部导入避免启动期环
+
+        conn = conn_factory()
+        try:
+            if not configured_roots(conn):
+                return
+            result = refresh(conn)
+            _watch_logger.info("仓库变更自动刷新：%d 个仓库", result.get("total", 0))
+        finally:
+            conn.close()
+        broker.publish("repo.changed", {"refreshed": True})
+    except GitUnavailable:
+        pass
+    except Exception:  # noqa: BLE001 - 监听线程异常不传播
+        _watch_logger.exception("仓库变更自动刷新失败")
+
+
+def _schedule_watch_refresh(conn_factory) -> None:
+    """文件变更事件 → 防抖后刷新（2s 窗口内多次变更合并成一次）。"""
+    global _watch_timer
+    with _watch_lock:
+        old = _watch_timer
+        if old is not None:
+            old.cancel()
+        timer = threading.Timer(REPO_WATCH_DEBOUNCE_SECONDS, _refresh_and_notify, args=(conn_factory,))
+        timer.daemon = True
+        _watch_timer = timer
+        timer.start()
+
+
+def start_watch(conn_factory) -> bool:
+    """启动代码仓库 watchdog：监听各仓库 .git 状态文件，变更后防抖自动刷新并广播。
+
+    - git 不可用 / 未配置代码根 / watchdog 未安装时返回 False（静默跳过，不影响服务）；
+    - 只在代码根目录层面观察（.git 是隐藏目录，需用 HiddenItems 过滤器）；
+    - 幂等：重复调用不会起第二个观察者。
+    """
+    global _watch_observer, _watch_roots
+    if _watch_observer is not None:
+        return True
+    if not _git_available():
+        return False
+    try:
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
+    except ImportError:  # pragma: no cover
+        return False
+
+    # 代码根可能包含多个仓库，观察根目录本身；用 _is_git_state_path 过滤到 .git 状态文件
+    with _get_watch_conn(conn_factory) as conn:
+        roots = [r for r in configured_roots(conn) if Path(r).is_dir()]
+    if not roots:
+        return False
+    _watch_roots = roots
+
+    class Handler(FileSystemEventHandler):
+        def _maybe_schedule(self, raw_path: str) -> None:
+            # 只关心 .git 内部的状态文件变动
+            path = Path(raw_path)
+            try:
+                parts = path.parts
+                if ".git" not in parts:
+                    return
+                git_idx = parts.index(".git")
+                rel = "/".join(parts[git_idx + 1 :])
+            except ValueError:
+                return
+            if not rel:
+                return  # .git 目录本身（新建/删除）也当状态变化
+            if _is_git_state_path(rel):
+                _schedule_watch_refresh(conn_factory)
+
+        def on_created(self, event):
+            self._maybe_schedule(event.src_path)
+
+        def on_modified(self, event):
+            self._maybe_schedule(event.src_path)
+
+        def on_deleted(self, event):
+            self._maybe_schedule(event.src_path)
+
+        def on_moved(self, event):
+            # 移动事件：目标路径（dest_path）才是「新位置」，源路径是旧位置
+            self._maybe_schedule(event.dest_path)
+
+    observer = Observer(timeout=1.0)
+    for root in roots:
+        observer.schedule(Handler(), root, recursive=True)
+    observer.daemon = True
+    observer.start()
+    _watch_observer = observer
+    _watch_logger.info("代码仓库 watchdog 已启动：%s", roots)
+    return True
+
+
+def _get_watch_conn(conn_factory):
+    """返回可作上下文管理器的连接，统一释放。"""
+    return _ConnCtx(conn_factory)
+
+
+class _ConnCtx:
+    def __init__(self, conn_factory):
+        self._f = conn_factory
+
+    def __enter__(self):
+        self._conn = self._f()
+        return self._conn
+
+    def __exit__(self, *exc):
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def stop_watch() -> None:
+    """停止代码仓库 watchdog（供应用关闭时调用）。"""
+    global _watch_observer, _watch_timer
+    with _watch_lock:
+        if _watch_timer is not None:
+            _watch_timer.cancel()
+            _watch_timer = None
+    if _watch_observer is not None:
+        _watch_observer.stop()
+        _watch_observer.join(timeout=3)
+        _watch_observer = None

@@ -7,9 +7,9 @@
  * - 状态由后端后台线程定期刷新（FR-GIT-03，每 30 分钟），本页也提供手动刷新；
  * - 仓库根目录在「设置」页配置（1~3 个，`paths.code_roots`）。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { reposApi, type GitRepo } from '@/api'
+import { eventsSocket, reposApi, type GitRepo } from '@/api'
 import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
 
@@ -20,7 +20,7 @@ const repos = ref<GitRepo[]>([])
 const hiddenRepos = ref<GitRepo[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
-const showHidden = ref(false)
+const showHidden = ref(true)
 const loadError = ref('')
 const roots = ref<string[]>([])
 
@@ -149,6 +149,15 @@ function repoStateKind(r: GitRepo): 'ok' | 'warn' | 'err' | 'missing' {
 
 onMounted(() => {
   void load()
+  // 代码有改动 → 后端 watchdog 自动刷新并推送 repo.changed → 前端自动重拉，无需手动点「刷新」
+  offRepoChanged = eventsSocket.on('repo.changed', () => {
+    void load()
+  })
+})
+
+let offRepoChanged: (() => void) | null = null
+onBeforeUnmount(() => {
+  offRepoChanged?.()
 })
 </script>
 
@@ -199,8 +208,8 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- 无仓库 -->
-    <section v-else-if="!repos.length" class="card rp-empty">
+    <!-- 无仓库（真一个都没发现；若还有隐藏仓库则仍进列表区，保证能恢复） -->
+    <section v-else-if="!repos.length && !hiddenCount" class="card rp-empty">
       <div class="empty-block">
         <span class="empty-ic"><Icon name="git" :size="24" /></span>
         <p>还没有发现代码仓库</p>
@@ -240,9 +249,40 @@ onMounted(() => {
               </span>
             </div>
 
-            <div class="rp-state" :class="repoStateKind(r)">
-              <span class="rp-state-dot" />
-              <span>{{ repoStateText(r) }}</span>
+            <div class="rp-head-right">
+              <div class="rp-state" :class="repoStateKind(r)">
+                <span class="rp-state-dot" />
+                <span>{{ repoStateText(r) }}</span>
+              </div>
+              <div class="rp-actions">
+                <button class="btn ghost sm" title="在此目录打开终端" @click="openTerminal(r)">
+                  <Icon name="terminal" :size="13" />
+                  <span>打开终端</span>
+                </button>
+                <button
+                  v-if="r.display !== 'pin'"
+                  class="btn ghost sm"
+                  title="置顶常用仓库"
+                  @click="setDisplay(r, 'pin')"
+                >
+                  <Icon name="zap" :size="13" /><span>置顶</span>
+                </button>
+                <button
+                  v-else
+                  class="btn ghost sm"
+                  title="取消置顶"
+                  @click="setDisplay(r, 'normal')"
+                >
+                  <Icon name="minusCircle" :size="13" /><span>取消置顶</span>
+                </button>
+                <button
+                  class="rp-hide"
+                  title="隐藏该仓库（不影响磁盘文件）"
+                  @click="setDisplay(r, 'hidden')"
+                >
+                  <Icon name="eyeOff" :size="13" />
+                </button>
+              </div>
             </div>
           </header>
 
@@ -295,38 +335,15 @@ onMounted(() => {
             <span class="rp-refresh" :title="r.refreshed_at || ''">
               刷新于 {{ fmtRefreshTime(r.refreshed_at) }}
             </span>
-            <div class="rp-actions">
-              <button class="btn ghost sm" title="在此目录打开终端" @click="openTerminal(r)">
-                <Icon name="terminal" :size="13" />
-                <span>打开终端</span>
-              </button>
-              <button
-                v-if="r.display !== 'pin'"
-                class="btn ghost sm"
-                title="置顶常用仓库"
-                @click="setDisplay(r, 'pin')"
-              >
-                <Icon name="zap" :size="13" /><span>置顶</span>
-              </button>
-              <button
-                v-else
-                class="btn ghost sm"
-                title="取消置顶"
-                @click="setDisplay(r, 'normal')"
-              >
-                <Icon name="minusCircle" :size="13" /><span>取消置顶</span>
-              </button>
-              <button
-                class="rp-hide"
-                title="隐藏该仓库（不影响磁盘文件）"
-                @click="setDisplay(r, 'hidden')"
-              >
-                <Icon name="eyeOff" :size="13" />
-              </button>
-            </div>
           </footer>
         </article>
       </div>
+
+      <!-- 全部隐藏时的引导提示 -->
+      <p v-if="!repos.length && hiddenCount" class="rp-all-hidden-tip">
+        <Icon name="eyeOff" :size="13" />
+        所有仓库都已隐藏，下面是隐藏的仓库，可点「恢复显示」重新放回列表。
+      </p>
 
       <!-- 隐藏的仓库 -->
       <section v-if="hiddenCount" class="card rp-hidden">
@@ -340,15 +357,16 @@ onMounted(() => {
             <Icon name="folder" :size="13" class="rp-folder-ic" />
             <span class="rp-name">{{ r.name }}</span>
             <code class="rp-hidden-path" :title="r.path">{{ r.path }}</code>
-            <button class="btn ghost sm" @click="setDisplay(r, 'normal')">恢复显示</button>
+            <button
+              class="rp-hide rp-restore"
+              title="恢复显示"
+              @click="setDisplay(r, 'normal')"
+            >
+              <Icon name="eye" :size="13" />
+            </button>
           </div>
         </div>
       </section>
-
-      <p class="rp-foot-tip">
-        <Icon name="info" :size="12" />
-        状态由后台每 30 分钟自动刷新；这里只读展示，提交 / 推送 / 切分支请用「打开终端」。
-      </p>
     </template>
   </div>
 </template>
@@ -415,6 +433,14 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .rp-card-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* 头部右侧：状态文字 + 操作按钮组（打开终端/置顶/隐藏） */
+.rp-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
 .rp-pin-ic {
   width: 18px;
   height: 18px;
@@ -550,23 +576,50 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .rp-refresh { font-size: 10px; color: var(--muted); }
-.rp-actions { display: flex; align-items: center; gap: 5px; margin-left: auto; }
+.rp-actions { display: flex; align-items: center; gap: 5px; }
+/* 仓库卡片操作按钮：把全局 .btn.ghost 的纯白底改成半透明玻璃，与毛玻璃卡片协调、不刺眼 */
+.rp-actions .btn.ghost,
+.rp-hero-meta .btn.ghost {
+  background: rgba(255, 255, 255, 0.42);
+  border-color: rgba(220, 217, 207, 0.7);
+  color: var(--ink-2);
+}
+.rp-actions .btn.ghost:hover,
+.rp-hero-meta .btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.6);
+  border-color: #dcd9cf;
+  color: var(--ink);
+}
 .rp-hide {
-  width: 28px;
-  height: 28px;
-  border: 1px solid transparent;
+  width: 29px;
+  height: 29px;
+  border: 1px solid rgba(220, 217, 207, 0.7);
   border-radius: 8px;
-  background: transparent;
-  color: #a6a29a;
+  background: rgba(255, 255, 255, 0.42);
+  color: var(--ink-2);
   display: inline-grid;
   place-items: center;
   cursor: pointer;
   transition: color 0.12s, background 0.12s, border-color 0.12s;
 }
-.rp-hide:hover { color: var(--ink-2); background: #f2f1ec; border-color: var(--line); }
+.rp-hide:hover { color: var(--ink); background: rgba(255, 255, 255, 0.6); border-color: #dcd9cf; }
 
 /* ---------------- 隐藏仓库 ---------------- */
 .rp-hidden { overflow: hidden; }
+.rp-all-hidden-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 9px 13px;
+  border-radius: 8px;
+  background: rgba(250, 240, 220, 0.4);
+  border: 1px solid var(--amber-line);
+  font-size: 11.5px;
+  color: var(--amber-ink);
+  line-height: 1.5;
+}
+.rp-all-hidden-tip svg { flex: none; }
 .rp-hidden-toggle {
   width: 100%;
   display: flex;
@@ -601,19 +654,18 @@ onMounted(() => {
 }
 .rp-hidden-row .rp-name { font-size: 12.5px; font-weight: 600; }
 
-.rp-foot-tip {
-  display: flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 5px;
-  margin: 0;
-  padding: 5px 9px;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid rgba(231, 229, 221, 0.6);
-  font-size: 10px;
-  color: #6a675f;
-  line-height: 1.6;
+/* 隐藏列表里的「恢复显示」眼睛图标：与卡片上的隐藏按钮同款，仅颜色语义不同（恢复=绿色系） */
+.rp-restore {
+  flex: none;
+  margin-left: auto;
+  color: var(--green-ink);
+  border: 1px solid rgba(98, 176, 118, 0.28);
+  background: rgba(235, 247, 238, 0.55);
+}
+.rp-restore:hover {
+  color: #fff;
+  background: var(--green);
+  border-color: var(--green);
 }
 
 .spin { animation: rp-spin 1s linear infinite; }

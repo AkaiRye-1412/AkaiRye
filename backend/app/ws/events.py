@@ -24,12 +24,13 @@ TOPIC_MANUAL_UPDATED = "manual.updated"    # 手册状态跃迁（即时）
 TOPIC_RAG_STREAM = "rag.stream"            # 回答 token 流（Q-14：POST 提问 + WS 流式）
 TOPIC_CONFIG_UPDATED = "config.updated"    # 配置热生效广播
 TOPIC_BACKUP_DONE = "backup.done"          # 备份完成
+TOPIC_REPO_CHANGED = "repo.changed"        # 代码仓库变更（watchdog 防抖后自动刷新）
 TOPIC_CONTEXT_REPORT = "context.report"    # 客户端 → 后端上下文上报（仅此 topic 允许客户端发送）
 
 VALID_TOPICS = {
     TOPIC_NOTE_CHANGED, TOPIC_INDEX_UPDATED, TOPIC_INGEST_PROGRESS,
     TOPIC_MANUAL_UPDATED, TOPIC_RAG_STREAM, TOPIC_CONFIG_UPDATED,
-    TOPIC_BACKUP_DONE, TOPIC_CONTEXT_REPORT,
+    TOPIC_BACKUP_DONE, TOPIC_REPO_CHANGED, TOPIC_CONTEXT_REPORT,
 }
 
 
