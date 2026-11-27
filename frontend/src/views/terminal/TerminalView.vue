@@ -45,6 +45,10 @@ async function loadTabs() {
   try {
     const list = await terminalApi.list()
     tabs.value = list.map((tab) => buildRuntime(tab))
+    // 首次进入无标签时，自动新建一个默认标签（默认 cwd 为用户主目录）
+    if (!tabs.value.length) {
+      await newTab(undefined, true)
+    }
     if (!activeId.value && tabs.value.length) {
       activeId.value = tabs.value[0].tab.tab_id
     }
@@ -107,8 +111,12 @@ async function activate(rt: TabRuntime) {
       rt.opened = true
     }
   }
-  rt.fit.fit()
-  rt.term.focus()
+  // 只有 xterm 已 open 到 DOM 时才做 fit/focus；未 open（如首次自动建标签、
+  // host 尚未渲染）时交给 onHostMounted 处理，避免对未初始化的 xterm 操作
+  if (rt.opened) {
+    rt.fit.fit()
+    rt.term.focus()
+  }
   ensureWs(rt)
 }
 
@@ -183,13 +191,13 @@ function teardownWs(rt: TabRuntime) {
 
 // ---------- 标签操作 ----------
 
-async function newTab(cwd?: string) {
+async function newTab(cwd?: string, silent = false) {
   try {
     const tab = await terminalApi.create({ cwd })
     const rt = buildRuntime(tab)
     tabs.value.push(rt)
     await activate(rt)
-    ui.toast('success', '已新建终端标签')
+    if (!silent) ui.toast('success', '已新建终端标签')
   } catch (e) {
     ui.toast('error', `新建标签失败：${(e as Error).message}`)
   }
@@ -243,6 +251,7 @@ function onHostMounted(tabId: string, el: unknown) {
       rt.term.open(el)
       rt.opened = true
       rt.fit.fit()
+      rt.term.focus()
       ensureWs(rt)
     }
   }
