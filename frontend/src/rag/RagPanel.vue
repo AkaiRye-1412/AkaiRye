@@ -716,17 +716,19 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
 
 .msg { border-radius: 10px; padding: 8px 11px; margin-bottom: 9px; line-height: 1.6; word-break: break-word; font-size: 12.5px; }
 .msg.user {
-  background: var(--blue);
+  background: rgba(42, 120, 214, 0.78);
   color: #fff;
   margin-left: 34px;
   border-bottom-right-radius: 4px;
   white-space: pre-wrap;
+  backdrop-filter: var(--glass-blur);
 }
 .msg.assistant {
-  background: #fbfbf8;
-  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.48);
+  border: 1px solid rgba(255, 255, 255, 0.35);
   margin-right: 10px;
   border-bottom-left-radius: 4px;
+  backdrop-filter: var(--glass-blur);
 }
 .msg.streaming .content { color: var(--ink-2); }
 
@@ -869,7 +871,8 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
   align-items: flex-end;
   padding: 10px 14px 12px;
   border-top: 1px solid var(--line-soft);
-  background: var(--card);
+  background: rgba(255, 255, 255, 0.48);
+  backdrop-filter: var(--glass-blur);
   flex: none;
 }
 .ask-input {

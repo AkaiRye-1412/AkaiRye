@@ -189,6 +189,101 @@ export const backupApi = {
   create: () => http.post<Record<string, any>>('/api/backups'),
 }
 
+/** ---------------- 存量整理（M7 / FR-CLEAN） ---------------- */
+
+export interface CleanupItem {
+  id: number
+  path: string
+  file_name: string
+  customer: string
+  project_name: string
+  status: 'active' | 'archived'
+  start_date: string
+  /** 缺失的原始 frontmatter 键（name/project/status/start_date/updated） */
+  missing: string[]
+  /** 各字段识别来源，如 { project: '文件名' } */
+  sources: Record<string, string>
+  /** 本次将写入的键（按磁盘现状计算，执行时会重算） */
+  changes: string[]
+  skip: boolean
+  applied: boolean
+  rolled_back: boolean
+  error: string | null
+}
+
+export interface CleanupBatch {
+  id: number
+  status: 'draft' | 'done' | 'rolled_back' | 'failed'
+  scope: 'missing' | 'all'
+  total: number
+  applied: number
+  skipped: number
+  failed: number
+  /** 已按快照还原的篇数（rolled_back 状态用来显示「已还原 N 篇」） */
+  restored: number
+  backup_path: string | null
+  note: string | null
+  created_at: string
+  executed_at: string | null
+  rolled_back_at: string | null
+  items?: CleanupItem[]
+}
+
+export interface CleanupSummary {
+  notes_total: number
+  head_missing: number
+  customers: string[]
+  last_batch: CleanupBatch | null
+  notes_folder: string
+}
+
+/** 预览表提交的字段子集（id/识别来源等只读字段不必回传） */
+export type CleanupItemInput = Pick<
+  CleanupItem,
+  'path' | 'customer' | 'project_name' | 'status' | 'start_date' | 'skip'
+>
+
+export interface CleanupExecResult {
+  batch: CleanupBatch
+  errors: { path: string; error: string }[]
+}
+
+export interface CleanupRollbackResult {
+  batch: CleanupBatch
+  restored: number
+  skipped: { path: string; reason: string }[]
+  errors: { path: string; error: string }[]
+  partial: boolean
+}
+
+export const cleanupApi = {
+  /** 头部数字：总篇数 / 待整理数 / 已知客户（补全时作 datalist） */
+  summary: () => http.get<CleanupSummary>('/api/cleanup/summary'),
+  batches: () => http.get<CleanupBatch[]>('/api/cleanup/batches'),
+  /** 扫描并生成草稿批次（会丢弃未执行的旧草稿） */
+  create: (scope: 'missing' | 'all' = 'missing') =>
+    http.post<CleanupBatch>('/api/cleanup/batches', { scope }),
+  get: (id: number) => http.get<CleanupBatch>(`/api/cleanup/batches/${id}`),
+  saveItems: (id: number, items: CleanupItemInput[]) =>
+    http.put<CleanupBatch>(`/api/cleanup/batches/${id}/items`, { items }),
+  /** 执行：先打包备份，再逐篇只写 frontmatter；items 为预览表最终值 */
+  execute: (id: number, items: CleanupItemInput[]) =>
+    http.post<CleanupExecResult>(`/api/cleanup/batches/${id}/execute`, { items }),
+  /** 回滚：默认跳过整理后被外部编辑过的笔记，force 才强写 */
+  rollback: (id: number, force = false) =>
+    http.post<CleanupRollbackResult>(`/api/cleanup/batches/${id}/rollback`, { force }),
+  /** 删除整理记录：草稿直接删；已执行 / 已回滚需 force（前端二次确认后传） */
+  remove: (id: number, force = false) =>
+    http.delete<{ deleted: boolean; batch_id: number; status: string }>(
+      `/api/cleanup/batches/${id}${force ? '?force=true' : ''}`,
+    ),
+  /** 清空整理记录，默认保留正在编辑的草稿 */
+  clearHistory: (keepDraft = true) =>
+    http.delete<{ deleted: number }>(
+      `/api/cleanup/batches${keepDraft ? '?keep_draft=true' : '?keep_draft=false'}`,
+    ),
+}
+
 export const manualsApi = {
   list: (query = '') => http.get<Record<string, any>[]>(`/api/manuals${query}`),
   pdfUrl: (manualId: number) => `/api/reader/pdf/${manualId}`,

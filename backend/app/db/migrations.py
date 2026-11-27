@@ -67,6 +67,60 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("迁移 v2 完成（note_file 增加 note_title / summary / tags / note_mode）")
 
+    if 3 not in applied:
+        conn.executescript(_CLEANUP_V3_SQL)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (3, 'cleanup_batch_item', ?)",
+            (_utcnow(),),
+        )
+        conn.commit()
+        logger.info("迁移 v3 完成（M7 存量整理：cleanup_batch / cleanup_item）")
+
+
+# v3：M7 存量整理（03 文档 6 章三期表预留的落位）。
+# - cleanup_item.before_content 保存执行前的完整原文，回滚按字节还原（只写头部 ≠ 只回滚头部：
+#   存原文最稳，且几十篇量级不会撑爆库）；
+# - backup_run 里另记一条 kind='cleanup_rollback' 的 zip，供工作台外手工恢复。
+# 禁止级联删除（database-rules）：批次与条目由服务层显式事务清理。
+_CLEANUP_V3_SQL = """
+CREATE TABLE IF NOT EXISTS cleanup_batch (
+    id             INTEGER PRIMARY KEY,
+    status         TEXT NOT NULL CHECK (status IN ('draft','done','rolled_back','failed')),
+    scope          TEXT NOT NULL DEFAULT 'missing' CHECK (scope IN ('missing','all')),
+    total          INTEGER NOT NULL DEFAULT 0,
+    applied        INTEGER NOT NULL DEFAULT 0,
+    skipped        INTEGER NOT NULL DEFAULT 0,
+    failed         INTEGER NOT NULL DEFAULT 0,
+    backup_path    TEXT,
+    note           TEXT,
+    created_at     TEXT NOT NULL,
+    executed_at    TEXT,
+    rolled_back_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cleanup_item (
+    id             INTEGER PRIMARY KEY,
+    batch_id       INTEGER NOT NULL REFERENCES cleanup_batch(id),
+    path           TEXT NOT NULL,                -- note_file.path 同口径（notes_dir 相对路径）
+    customer       TEXT,
+    project_name   TEXT,
+    status         TEXT,                         -- 目标状态：active | archived
+    start_date     TEXT,                         -- YYYY-MM-DD
+    missing        TEXT,                         -- JSON 数组：缺失的原始键
+    sources        TEXT,                         -- JSON 对象：各字段识别来源
+    changes        TEXT,                         -- JSON 数组：本次将写入的键
+    skip           INTEGER NOT NULL DEFAULT 0,
+    applied        INTEGER NOT NULL DEFAULT 0,
+    rolled_back    INTEGER NOT NULL DEFAULT 0,
+    error          TEXT,
+    before_content TEXT,                         -- 执行前原文（回滚真相源）
+    before_hash    TEXT,
+    after_hash     TEXT,
+    UNIQUE (batch_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_cleanup_item_batch ON cleanup_item (batch_id);
+"""
+
 
 # v2：note_file 列表展示派生字段（列已存在则跳过，兼容 v1 新库与旧库）
 _NOTE_FILE_V2_COLUMNS: tuple[tuple[str, str], ...] = (
