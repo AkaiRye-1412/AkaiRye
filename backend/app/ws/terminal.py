@@ -82,10 +82,16 @@ async def terminal_ws(ws: WebSocket, tab_id: str) -> None:
     # 首次附着回传 cwd（前端标签标题显示）
     await ws.send_text(json.dumps({"type": "cwd", "cwd": tab.cwd}, ensure_ascii=False))
 
-    # 复用已有常驻 PTY（重连）时，补发一个空回车唤醒 shell 提示符，
-    # 避免前端刷新后因 banner/提示符已被上次连接消费而显得"空白"
     if not is_new:
-        pty.write("\r\n")
+        # 复用已有常驻 PTY（重连 / 页面刷新）：重放输出历史快照，还原 shell/TUI 已渲染界面。
+        # 之前只补发空回车，对普通 shell 能唤醒提示符，但对 claude/vim 等全屏 TUI 无效（界面不会重绘），
+        # 导致刷新后一片空白。现改为重放历史输出：前端 xterm 从空白按序执行历史里的全部 ANSI 序列
+        # （含 TUI 的备用屏幕/清屏/光标定位），即可精确重建当前屏幕状态。
+        # 用专用 replay 帧（而非 output），前端据此在重放期间屏蔽 onData 转发，
+        # 避免 xterm 对历史里终端查询序列（DA1 \x1b[c / DSR \x1b[6n）的自动响应被写回 shell 造成污染。
+        snapshot = pty.snapshot()
+        if snapshot:
+            await ws.send_text(json.dumps({"type": "replay", "data": snapshot}, ensure_ascii=False))
 
     reader_task = asyncio.create_task(_pump_pty_output(ws, pty, tab_id))
 
@@ -111,6 +117,7 @@ async def terminal_ws(ws: WebSocket, tab_id: str) -> None:
                 cols = int(msg.get("cols") or 0)
                 rows = int(msg.get("rows") or 0)
                 if cols > 0 and rows > 0:
+                    logger.info("终端 resize（tab=%s）：cols=%d rows=%d", tab_id, cols, rows)
                     try:
                         pty._proc.setwinsize(rows, cols)  # noqa: SLF001 - pywinpty 私有句柄
                     except Exception:  # noqa: BLE001 - 尺寸调整失败不影响主流程

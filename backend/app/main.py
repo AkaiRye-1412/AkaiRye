@@ -22,6 +22,7 @@ from app.api import (
     pdf,
     projects,
     rag,
+    repos,
     system,
     terminal,
     translate,
@@ -31,6 +32,7 @@ from app.core.config import runtime
 from app.core.logging import setup_logging
 from app.db import database, migrations
 from app.services import backup as backup_service
+from app.services import git_service
 from app.services import manual_index
 from app.services import rag_service
 from app.services import terminal as terminal_service
@@ -115,9 +117,13 @@ async def lifespan(app: FastAPI):
         # POST /api/kb/autofill —— 隐式后台任务会与用户随后的操作（单篇重建/白名单调整）
         # 并发写同一个库，SQLite 锁冲突会让同步索引莫名的少索引几篇。
 
+    # 代码仓库定期刷新（FR-GIT-03）：启动即刷一次，此后每 30 分钟自动刷新
+    git_service.start_periodic_refresh(database.connect)
+
     events.broker.subscribe("config.updated", _on_config_updated)
     yield
     vault_service_module.vault_service.stop_watch()
+    git_service.stop_periodic_refresh()
 
 
 def create_app() -> FastAPI:
@@ -165,6 +171,7 @@ def create_app() -> FastAPI:
     app.include_router(cleanup.router)
     app.include_router(backups.router)
     app.include_router(terminal.router)
+    app.include_router(repos.router)
     app.include_router(events.router)   # /ws/events
     app.include_router(terminal_ws.router)  # /ws/terminal/{tab_id}
 

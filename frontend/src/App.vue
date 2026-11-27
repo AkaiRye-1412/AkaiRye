@@ -50,8 +50,11 @@ const vaultOk = computed(() => !!configStore.status?.vault_root_valid)
 const configOk = computed(() => !!configStore.status?.config_complete)
 const indexedCount = computed(() => configStore.status?.counts?.notes ?? 0)
 
-// 首页铺满到窗口底（与知识助手面板底边齐平），主区不保留底部内边距。
-const isHome = computed(() => route.name === 'home')
+// 首页/终端铺满到窗口底（与知识助手面板底边齐平），主区不保留底部内边距。
+// 终端页必须铺满：.main 默认的 padding+overflow:auto 会压缩终端可视高度并叠加外层
+// 滚动条，导致 xterm fit 出的 rows 偏小、提示符贴底、滚动条行为异常（与 xterm 内层
+// 滚动条冲突）。终端铺满后 .term-page 精确填满可视高度，fit 才能算准。
+const isHome = computed(() => route.name === 'home' || route.name === 'terminal')
 
 function newNote() {
   router.push({ path: '/notes', query: { new: '1' } })

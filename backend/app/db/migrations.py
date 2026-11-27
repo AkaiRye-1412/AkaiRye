@@ -85,6 +85,24 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("迁移 v4 完成（M5 终端：terminal_tab）")
 
+    if 5 not in applied:
+        conn.executescript(_GIT_REPO_V5_SQL)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (5, 'git_repo', ?)",
+            (_utcnow(),),
+        )
+        conn.commit()
+        logger.info("迁移 v5 完成（M6 代码仓库：git_repo）")
+
+    if 6 not in applied:
+        _migrate_v6_git_repo_columns(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (6, 'git_repo_remote_commit', ?)",
+            (_utcnow(),),
+        )
+        conn.commit()
+        logger.info("迁移 v6 完成（git_repo 增加 remote_url / commit_count）")
+
 
 # v3：M7 存量整理（03 文档 6 章三期表预留的落位）。
 # - cleanup_item.before_content 保存执行前的完整原文，回滚按字节还原（只写头部 ≠ 只回滚头部：
@@ -147,6 +165,27 @@ CREATE INDEX IF NOT EXISTS idx_terminal_tab_sort ON terminal_tab (sort);
 """
 
 
+# v5：M6 代码仓库（03 文档 7.3「代码仓库记录（派生数据）」落位）。
+# - path 为仓库本地路径（真相锚点，唯一）；display 为置顶/普通/隐藏三态（FR-GIT-02）；
+# - 状态摘要（分支/未提交数/领先落后/最近提交）是派生数据，每次扫描重建，不新增真相源；
+# - 只读（FR-GIT-05）：本表只存展示状态与刷新时间，没有任何写操作语义。
+_GIT_REPO_V5_SQL = """
+CREATE TABLE IF NOT EXISTS git_repo (
+    path          TEXT PRIMARY KEY,
+    display       TEXT NOT NULL DEFAULT 'normal' CHECK (display IN ('pin','normal','hidden')),
+    refreshed_at  TEXT,
+    branch        TEXT,
+    ahead         INTEGER,
+    behind        INTEGER,
+    dirty         INTEGER,
+    last_commit   TEXT,
+    last_commit_at TEXT,
+    error         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_git_repo_display ON git_repo (display);
+"""
+
+
 # v2：note_file 列表展示派生字段（列已存在则跳过，兼容 v1 新库与旧库）
 _NOTE_FILE_V2_COLUMNS: tuple[tuple[str, str], ...] = (
     ("note_title", "TEXT"),
@@ -154,6 +193,21 @@ _NOTE_FILE_V2_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tags", "TEXT"),
     ("note_mode", "TEXT"),
 )
+
+
+# v6：git_repo 增加远端地址与提交总数（列已存在则跳过，兼容 v5 旧库）
+_GIT_REPO_V6_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("remote_url", "TEXT"),
+    ("commit_count", "INTEGER"),
+)
+
+
+def _migrate_v6_git_repo_columns(conn: sqlite3.Connection) -> None:
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(git_repo)").fetchall()}
+    for name, decl in _GIT_REPO_V6_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE git_repo ADD COLUMN {name} {decl}")
+    # 旧行为 NULL：下次刷新（GET /api/repos 或后台线程）由 read_status 填充
 
 
 def _migrate_v2_note_file_columns(conn: sqlite3.Connection) -> None:

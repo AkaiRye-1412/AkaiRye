@@ -10,7 +10,7 @@
  * - 保存后热生效（config.updated 广播）。
  */
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { configApi, kbApi, type Brand, type KbStats } from '@/api'
+import { configApi, kbApi, reposApi, type Brand, type KbStats } from '@/api'
 import { useConfigStore } from '@/stores/config'
 import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
@@ -388,20 +388,44 @@ async function testEmbedding() {
 
 // ---- 路径 / 白名单 / 索引 --------------------------------------------------
 
-function addCodeRoot() {
+async function addCodeRoot() {
   const v = newCodeRoot.value.trim()
   if (!v) return
   if (paths.code_roots.includes(v)) {
     ui.toast('warn', '该目录已在列表中')
     return
   }
+  if (paths.code_roots.length >= 3) {
+    ui.toast('warn', '最多添加 3 个代码根目录')
+    return
+  }
   paths.code_roots.push(v)
   newCodeRoot.value = ''
   addingCodeRoot.value = false
+  await saveCodeRoots('已添加并保存目录')
 }
 
-function removeCodeRoot(v: string) {
+async function removeCodeRoot(v: string) {
   paths.code_roots = paths.code_roots.filter((x) => x !== v)
+  await saveCodeRoots('已移除并保存目录')
+}
+
+/** 代码根目录增删后立即落库并触发仓库扫描（免手动点「保存设置」） */
+async function saveCodeRoots(successText: string) {
+  try {
+    await configStore.save({ paths: pathsPayload() })
+    await configStore.load()
+    syncFromStore()
+    // 触发仓库后台扫描，让代码仓库页即时发现新目录
+    try {
+      await reposApi.refresh()
+    } catch {
+      /* 扫描失败不阻断保存提示 */
+    }
+    ui.toast('success', successText)
+  } catch (e) {
+    ui.toast('error', `保存失败：${(e as Error).message}`)
+  }
 }
 
 function addFolder() {

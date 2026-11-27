@@ -9,6 +9,7 @@
  * - 关闭运行中标签二次确认（FR-TERM-07）：DELETE 带 force（前端先 confirm）。
  */
 import { computed, onBeforeUnmount, onMounted, ref, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -17,6 +18,7 @@ import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
 
 const ui = useUiStore()
+const route = useRoute()
 
 interface TabRuntime {
   tab: TerminalTab
@@ -27,6 +29,10 @@ interface TabRuntime {
   alive: boolean
   closed: boolean
   opened: boolean
+  replaying: boolean
+  // 容器尺寸观察器：fit 依赖父容器真实尺寸；flex 布局下首次 open 时高度可能未稳定，
+  // 用 ResizeObserver 在容器尺寸真正确定后重新 fit，避免 rows 算错（光标贴底/滚动条异常）。
+  ro: ResizeObserver | null
 }
 
 const tabs = ref<TabRuntime[]>([])
@@ -45,8 +51,12 @@ async function loadTabs() {
   try {
     const list = await terminalApi.list()
     tabs.value = list.map((tab) => buildRuntime(tab))
-    // 首次进入无标签时，自动新建一个默认标签（默认 cwd 为用户主目录）
-    if (!tabs.value.length) {
+    // 从「代码仓库」等入口带 ?cwd= 跳转过来：在该目录新建一个标签（FR-TERM-06）
+    const wantedCwd = typeof route.query.cwd === 'string' ? route.query.cwd.trim() : ''
+    if (wantedCwd) {
+      await newTab(wantedCwd, true)
+    } else if (!tabs.value.length) {
+      // 首次进入无标签时，自动新建一个默认标签（默认 cwd 为用户主目录）
       await newTab(undefined, true)
     }
     if (!activeId.value && tabs.value.length) {
@@ -79,13 +89,35 @@ function buildRuntime(tab: TerminalTab): TabRuntime {
       selectionBackground: 'rgba(42,120,214,0.35)',
     },
     scrollback: 5000,
-    convertEol: true,
+    // 关键：默认 true 会在「每次用户输入」时强制滚到底部，导致向上滚看历史时
+    // 一敲键盘就被拉回底部（无法停留在历史位置）。设为 false，由 writeOutput 统一控制跟随。
+    scrollOnUserInput: false,
+    // 加宽 overview ruler：默认 14px 太窄，滚动条滑块在 webview 里很难点中/拖动。
+    // 加宽后滚动条更接近 cmd 的可操作性（滑块更大、更容易上下拖动）。
+    overviewRuler: { width: 16 },
   })
   const fit = new FitAddon()
   term.loadAddon(fit)
-  term.onData((data) => {
+  // 尺寸同步（关键修复）：xterm fit 后把 cols/rows 通过 WS 发给后端，让 ConPTY/cmd
+  // 同步窗口尺寸。否则前端列宽与 ConPTY 默认 80 列不一致时，长提示符折行会让
+  // cmd 与 xterm 对「光标在哪一列」判断错位，导致光标漂移（如 git status 后光标
+  // 跑到上一行中间）。onResize 在 fit/resize 时触发，这里统一发送。
+  term.onResize(({ cols, rows }) => {
     if (rt.ws && rt.ws.readyState === WebSocket.OPEN) {
-      rt.ws.send(JSON.stringify({ type: 'input', data }))
+      rt.ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+    }
+  })
+  term.onData((data) => {
+    // 重放历史期间不转发：xterm 对历史里终端查询序列（DA1/DSR）的自动响应
+    // 若转发回 shell 会被 cmd 当输入回显成 ^[[?1;2c 之类的污染，且随刷新累积。
+    if (rt.replaying) return
+    // 过滤 xterm 对终端查询的自动响应（DA1 \x1b[?1;2c / DSR \x1b[{row};{col}R / 其它 ? 查询）：
+    // 这些是 xterm 内部生成的、回应 shell 发出的能力协商序列，不该回传给 cmd（cmd 不认识、
+    // 会当作输入回显造成污染）。用户正常键入不会产生此类序列。
+    const cleaned = data.replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\[[0-9]+;[0-9]+R/g, '')
+    if (!cleaned) return
+    if (rt.ws && rt.ws.readyState === WebSocket.OPEN) {
+      rt.ws.send(JSON.stringify({ type: 'input', data: cleaned }))
     }
   })
   const rt: TabRuntime = {
@@ -97,6 +129,8 @@ function buildRuntime(tab: TerminalTab): TabRuntime {
     alive: tab.alive,
     closed: false,
     opened: false,
+    replaying: false,
+    ro: null,
   }
   return rt
 }
@@ -104,6 +138,15 @@ function buildRuntime(tab: TerminalTab): TabRuntime {
 function wsUrl(tabId: string): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   return `${proto}://${location.host}/ws/terminal/${tabId}`
+}
+
+// 写入终端输出：直接交给 xterm 自然渲染。
+// 关键：不要手动 scrollToBottom()。xterm 默认行为就是「光标停在内容末尾、下方留白」，
+// 与 cmd 一致；手动 scrollToBottom 会把不满一屏的内容硬滚到底部（提示符贴底），
+// 且滚动条会被锁死，无法像 cmd 那样自由上下滑动。配合 scrollOnUserInput:false，
+// 用户向上滚看历史时也不会被新输出拉回底部。
+function writeOutput(rt: TabRuntime, data: string) {
+  rt.term.write(data)
 }
 
 // ---------- 标签激活 / 附着 ----------
@@ -121,7 +164,7 @@ async function activate(rt: TabRuntime) {
   // 只有 xterm 已 open 到 DOM 时才做 fit/focus；未 open（如首次自动建标签、
   // host 尚未渲染）时交给 onHostMounted 处理，避免对未初始化的 xterm 操作
   if (rt.opened) {
-    rt.fit.fit()
+    fitAndObserve(rt)
     rt.term.focus()
   }
   ensureWs(rt)
@@ -142,6 +185,19 @@ function ensureWs(rt: TabRuntime) {
   rt.ws = ws
   ws.onopen = () => {
     rt.alive = true
+    // 连接建立后先清空 xterm，等待后端重放输出历史（重连/刷新场景由后端统一重放还原界面）。
+    // 避免断线重连时旧内容与重放历史叠加重复。
+    rt.term.reset()
+    // 补发一次当前尺寸：首次 fit 发生在 WS 建立之前（rt.ws 为 null，onResize 没发出去），
+    // 此处按当前 xterm 尺寸显式同步一次给 ConPTY，确保后端窗口尺寸正确。
+    try {
+      const { cols, rows } = rt.term
+      if (cols > 0 && rows > 0) {
+        ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+      }
+    } catch {
+      /* ignore */
+    }
   }
   ws.onmessage = (ev) => {
     let frame: { type: string; data?: string; cwd?: string }
@@ -152,10 +208,19 @@ function ensureWs(rt: TabRuntime) {
     }
     switch (frame.type) {
       case 'output':
-        rt.term.write(frame.data ?? '')
+        writeOutput(rt, frame.data ?? '')
+        break
+      case 'replay':
+        // 重放历史快照：写期间屏蔽 onData 转发，避免 xterm 对查询序列的自动响应污染 shell
+        rt.replaying = true
+        try {
+          writeOutput(rt, frame.data ?? '')
+        } finally {
+          rt.replaying = false
+        }
         break
       case 'builtin':
-        rt.term.write(frame.data ?? '')
+        writeOutput(rt, frame.data ?? '')
         if (frame.cwd) rt.tab.cwd = frame.cwd
         break
       case 'cwd':
@@ -165,7 +230,7 @@ function ensureWs(rt: TabRuntime) {
         rt.alive = false
         break
       case 'error':
-        rt.term.write(`\r\n\x1b[31m[错误] ${frame.data ?? ''}\x1b[0m\r\n`)
+        writeOutput(rt, `\r\n\x1b[31m[错误] ${frame.data ?? ''}\x1b[0m\r\n`)
         break
       default:
         break
@@ -228,6 +293,10 @@ async function doClose(rt: TabRuntime) {
   }
   rt.closed = true
   teardownWs(rt)
+  if (rt.ro) {
+    rt.ro.disconnect()
+    rt.ro = null
+  }
   rt.term.dispose()
   const idx = tabs.value.indexOf(rt)
   tabs.value.splice(idx, 1)
@@ -257,10 +326,37 @@ function onHostMounted(tabId: string, el: unknown) {
     if (rt && activeId.value === tabId && !rt.opened) {
       rt.term.open(el)
       rt.opened = true
-      rt.fit.fit()
+      fitAndObserve(rt)
       rt.term.focus()
       ensureWs(rt)
     }
+  }
+}
+
+// fit + 建立容器尺寸观察器：flex 布局下 xterm open 后容器高度可能尚未稳定，
+// fit 算出的 rows 会偏小，导致光标贴底、滚动条滚动范围异常。用 rAF 延后首次 fit，
+// 再用 ResizeObserver 在容器尺寸真正确定后重 fit，确保 rows 精确。
+function fitAndObserve(rt: TabRuntime) {
+  requestAnimationFrame(() => {
+    if (rt.closed || !rt.opened) return
+    try {
+      rt.fit.fit()
+    } catch {
+      /* fit 可能因容器尚未布局而抛错，交给 ResizeObserver 兜底 */
+    }
+  })
+  // 容器尺寸变化时重新 fit（含首次布局稳定后的那次触发）
+  if (!rt.ro && typeof ResizeObserver !== 'undefined') {
+    rt.ro = new ResizeObserver(() => {
+      if (rt.closed || !rt.opened) return
+      try {
+        rt.fit.fit()
+      } catch {
+        /* ignore */
+      }
+    })
+    const host = hostEls.get(rt.tab.tab_id)
+    if (host) rt.ro.observe(host)
   }
 }
 
@@ -275,6 +371,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   tabs.value.forEach((rt) => {
     teardownWs(rt)
+    if (rt.ro) {
+      rt.ro.disconnect()
+      rt.ro = null
+    }
     rt.term.dispose()
   })
 })
@@ -348,8 +448,9 @@ function onResize() {
 .term-page {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
   min-height: 0;
+  height: 100%;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -443,7 +544,10 @@ function onResize() {
 .term-host {
   flex: 1;
   min-height: 0;
-  padding: 10px 12px;
+  /* 关键：不能有 padding。FitAddon.fit() 依赖 .xterm 精确填满父容器来算 cols/rows；
+     任何 padding 都会让测量偏差，导致 rows 算错 → 光标贴底、滚动条滚动范围异常、
+     无法自由滑动。终端内容贴边更接近 cmd 原生态。 */
+  padding: 0;
 }
 .term-host.hidden { display: none; }
 .term-host :deep(.xterm) { height: 100%; }

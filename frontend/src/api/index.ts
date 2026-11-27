@@ -290,6 +290,35 @@ export const manualsApi = {
   meta: (manualId: number) => http.get<Record<string, any>>(`/api/reader/meta/${manualId}`),
 }
 
+/** ---------------- 代码仓库（M6 / FR-GIT） ---------------- */
+
+export type RepoDisplay = 'pin' | 'normal' | 'hidden'
+
+export interface GitRepo {
+  path: string
+  name: string
+  display: RepoDisplay
+  exists: boolean
+  branch: string | null
+  ahead: number | null
+  behind: number | null
+  dirty: number | null
+  last_commit: string | null
+  last_commit_at: string | null
+  remote_url: string | null
+  commit_count: number | null
+  error: string | null
+  refreshed_at: string | null
+}
+
+export const reposApi = {
+  list: (includeHidden = false) =>
+    http.get<GitRepo[]>(`/api/repos${includeHidden ? '?include_hidden=true' : ''}`),
+  refresh: () => http.post<{ total: number; roots: string[] }>('/api/repos/refresh'),
+  setDisplay: (path: string, display: RepoDisplay) =>
+    http.patch<GitRepo>(`/api/repos?path=${encodeURIComponent(path)}`, { display }),
+}
+
 /** ---------------- 终端（M5 / FR-TERM） ---------------- */
 
 export interface TerminalTab {

@@ -56,7 +56,7 @@ class PtyHandle:
     与 WS 连接生命周期解耦——重连不会产生多个读线程，也不会因旧读线程阻塞 executor。
     """
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, cols: int = 100, rows: int = 30):
         from winpty import PtyProcess  # pywinpty（FR-TERM，pyproject pty 可选组）
 
         # ConPTY 用 cmd.exe 承载（Windows 默认 shell）
@@ -67,12 +67,25 @@ class PtyHandle:
         env = dict(os.environ)
         env["CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_DROP"] = "1"
         env["CLAUDE_CODE_DISABLE_SELF_NAMED_CERT_ORP"] = "1"
-        self._proc = PtyProcess.spawn("cmd.exe", cwd=cwd, env=env)
+        # 关键：spawn 时就传入接近前端实际宽度的尺寸（默认 80 列过窄）。cmd.exe 启动时
+        # 会用这个列宽固化提示符的光标定位序列（如 \x1b[4;48H）；若 spawn 后 setwinsize
+        # 改宽，cmd 的定位序列不会跟着更新，导致光标定位到错误列/行，产生空行、滚动条虚增。
+        self._proc = PtyProcess.spawn(
+            "cmd.exe", cwd=cwd, env=env, dimensions=(rows, cols)
+        )
+        self._cols = cols
+        self._rows = rows
         self.pid = self._proc.pid
         # 写缓冲：PtyProcess 非线程安全，写用锁串行化
         self._write_lock = threading.Lock()
         # 输出队列：读线程 → WS 消费（元素为 str，pywinpty 3.x read 已返回解码文本）
         self._out_queue: "queue.Queue[str | None]" = queue.Queue(maxsize=4096)
+        # 输出历史：环形字节缓冲，供重连时重放（页面刷新后还原 shell/TUI 已渲染界面）。
+        # 上限 256 KiB，超限丢弃最旧内容（TUI 全屏界面约几十 KiB，普通 shell 更小）。
+        self._history: list[str] = []
+        self._history_size = 0
+        self._history_cap = 256 * 1024
+        self._history_lock = threading.Lock()
         self._reader = threading.Thread(target=self._read_loop, name=f"pty-reader-{self.pid}", daemon=True)
         self._reader.start()
 
@@ -91,6 +104,7 @@ class PtyHandle:
                             self._out_queue.put_nowait(data)
                         except queue.Empty:
                             pass
+                    self._record_history(data)
         except EOFError:
             pass  # 进程退出
         except Exception:  # noqa: BLE001 - 句柄失效等
@@ -105,6 +119,20 @@ class PtyHandle:
     def write(self, data: str) -> None:
         with self._write_lock:
             self._proc.write(data)
+
+    def _record_history(self, data: str) -> None:
+        """把读线程的输出追加进历史环形缓冲（按字节数计量）。"""
+        with self._history_lock:
+            self._history.append(data)
+            self._history_size += len(data)
+            while self._history and self._history_size > self._history_cap:
+                dropped = self._history.pop(0)
+                self._history_size -= len(dropped)
+
+    def snapshot(self) -> str:
+        """返回输出历史快照（str），供 WS 重连时重放还原已渲染界面。"""
+        with self._history_lock:
+            return "".join(self._history)
 
     def read_available(self, timeout: float = 0.05) -> str | None:
         """非阻塞取一块输出（str）；None 表示 PTY 已退出，b"" 已不存在——空串表示暂无数据。
