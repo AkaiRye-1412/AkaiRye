@@ -108,6 +108,18 @@ async def lifespan(app: FastAPI):
 
     # 配置热生效联动：路径配置变更后重挂 watchdog（无需重启服务）
     def _on_config_updated(payload: dict) -> None:
+        # 向量模型切换：清空旧向量 + 全部笔记/手册标待索引（R4 维度一致性）
+        if "embedding_model_changed" in payload:
+            info = payload["embedding_model_changed"]
+            try:
+                conn = database.connect()
+                try:
+                    indexer_service.invalidate_stale_index(conn, info.get("new", ""))
+                finally:
+                    conn.close()
+                logger.info("向量模型切换 %s → %s：旧索引已清空，待重索引", info.get("old"), info.get("new"))
+            except Exception:  # noqa: BLE001
+                logger.exception("向量模型切换后清空旧索引失败")
         if "paths" not in payload.get("keys", []):
             return
         vs = vault_service_module.vault_service

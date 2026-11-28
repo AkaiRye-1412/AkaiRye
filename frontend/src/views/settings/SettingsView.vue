@@ -49,6 +49,13 @@ const llm = reactive({
 })
 const embedding = reactive({ mode: 'cloud', provider: '', api_key: '', model: '', dim: 0 })
 
+/** 云端 / 本地各一套「已保存」的 provider/model/dim/api_key，切换时据此恢复，互不覆盖 */
+type EmbProfile = { provider: string; model: string; dim: number }
+const embProfiles = reactive<Record<'cloud' | 'ollama', EmbProfile>>({
+  cloud: { provider: '', model: '', dim: 0 },
+  ollama: { provider: '', model: '', dim: 0 },
+})
+
 /* ---- 本地 Ollama：扫描本机模型（设置页「本地自托管」） ---- */
 const ollamaModels = ref<OllamaModel[]>([])
 const ollamaState = reactive({ loading: false, running: null as boolean | null, text: '' })
@@ -82,6 +89,9 @@ async function loadOllamaModels(silent = false) {
       // 归一化到列表里的写法，下拉才不会显示成空白
       const hit = r.models.find((m) => sameModel(m.name, embedding.model))
       if (hit && hit.name !== embedding.model.trim()) embedding.model = hit.name
+      // 修正结果同步进 ollama 缓存，切换回来时仍保持
+      embProfiles.ollama.provider = embedding.provider.trim()
+      embProfiles.ollama.model = embedding.model.trim()
     } else {
       ollamaState.text = r.error || '未检测到本机 Ollama'
     }
@@ -95,7 +105,20 @@ async function loadOllamaModels(silent = false) {
 }
 
 function setEmbMode(mode: 'cloud' | 'ollama') {
+  if (mode === embedding.mode) return
+  // 先把当前表单值存进当前 mode 的缓存，再切到目标 mode 并恢复其缓存
+  embProfiles[embedding.mode as 'cloud' | 'ollama'] = {
+    provider: embedding.provider.trim(),
+    model: embedding.model.trim(),
+    dim: Number(embedding.dim) || 0,
+  }
   embedding.mode = mode
+  const p = embProfiles[mode]
+  embedding.provider = p.provider
+  embedding.model = p.model
+  embedding.dim = p.dim
+  // 密钥只跟「云端」走；切到本地时清空表单里的 key 输入，切回云端不自动回填（留空=不修改已存密钥）
+  embedding.api_key = ''
   if (mode === 'ollama') {
     if (!embedding.provider.trim()) embedding.provider = 'http://127.0.0.1:11434/v1'
     void loadOllamaModels(true)
@@ -105,7 +128,11 @@ function setEmbMode(mode: 'cloud' | 'ollama') {
 /** 选了本机模型：维度按模型元数据回填（仍可手改） */
 function onPickOllamaModel() {
   const hit = pickedOllama.value
-  if (hit?.dim) embedding.dim = hit.dim
+  if (hit?.dim) {
+    embedding.dim = hit.dim
+    embProfiles.ollama.dim = hit.dim
+    embProfiles.ollama.model = embedding.model.trim()
+  }
 }
 const paths = reactive({
   vault_root: '',
@@ -359,6 +386,9 @@ function embeddingPayload() {
     provider: embedding.provider.trim(),
     model: embedding.model.trim(),
     dim: Math.min(8192, Math.max(0, dim)),
+    // 同步当前 mode 的缓存（含另一套不变），后端据此持久化双套配置
+    cloud: { ...embProfiles.cloud },
+    ollama: { ...embProfiles.ollama },
   }
   if (embedding.api_key.trim()) p.api_key = embedding.api_key.trim()
   return p
@@ -498,6 +528,16 @@ function syncFromStore() {
     model: c.embedding?.model ?? '',
     dim: c.embedding?.dim ?? 0,
   })
+  // 云端 / 本地双套缓存：优先取子对象，缺则回落顶层当前值（兼容旧配置）
+  const top = { provider: c.embedding?.provider ?? '', model: c.embedding?.model ?? '', dim: c.embedding?.dim ?? 0 }
+  for (const mode of ['cloud', 'ollama'] as const) {
+    const sub = c.embedding?.[mode] ?? {}
+    embProfiles[mode] = {
+      provider: sub.provider ?? top.provider,
+      model: sub.model ?? top.model,
+      dim: Number(sub.dim ?? top.dim) || 0,
+    }
+  }
   Object.assign(paths, buildPathsForm(c))
   dbFileDir.value = dbLoc.value?.dir ?? ''
   Object.assign(dashboard, {
@@ -744,6 +784,8 @@ async function testEmbedding() {
       embTest.ok = true
       const before = Number(embedding.dim) || 0
       if (r.dim) embedding.dim = r.dim
+      // 实测维度同步进当前 mode 缓存，切换后仍能记住
+      embProfiles[embedding.mode as 'cloud' | 'ollama'].dim = r.dim || before
       const how = r.local ? '本地 Ollama 正常' : '连通正常'
       embTest.text = `${how} · ${r.latency_ms} ms · dim=${r.dim}`
       if (r.dim && before && before !== r.dim) {

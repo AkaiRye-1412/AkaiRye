@@ -16,7 +16,18 @@ API_KEY_MASK = "******"
 # 预置键及默认值（03 文档 3.1；value_json 为 JSON 对象）
 DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "llm": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": 0.7},
-    "embedding": {"mode": "cloud", "provider": "", "api_key": "", "model": "", "dim": 1024},
+    # embedding 顶层字段是「当前生效」的一套（mode 决定 provider/model/dim/api_key 的归属），
+    # cloud / ollama 两个子对象各自缓存另一套的 provider/model/dim/api_key，
+    # 切换运行方式时前端据此自动恢复，互不覆盖（见 _split_embedding / _merge_embedding）。
+    "embedding": {
+        "mode": "cloud",
+        "provider": "",
+        "api_key": "",
+        "model": "",
+        "dim": 1024,
+        "cloud": {"provider": "", "api_key": "", "model": "", "dim": 1024},
+        "ollama": {"provider": "", "api_key": "", "model": "", "dim": 0},
+    },
     # 索引位置（售后/个人/PDF/数据库/项目开发各最多 3 个，第 1 个为主位置；留空则回落旧单值字段）
     # after_sales_roots 售后笔记 / memo_roots 个人笔记
     # pdf_roots PDF 手册（仅手册界面浏览/预览，不作为知识库索引来源）
@@ -66,6 +77,7 @@ def load_all(conn) -> dict[str, Any]:
             merged[k].update(v)
         else:
             merged[k] = v
+    _migrate_embedding(merged.get("embedding") or {})
     _mask_secrets(merged)
     return merged
 
@@ -76,7 +88,50 @@ def get_raw(conn, key: str) -> dict[str, Any]:
     merged = dict(DEFAULT_CONFIG.get(key, {}))
     if row is not None:
         merged.update(json.loads(row["value_json"]))
+    if key == "embedding":
+        _migrate_embedding(merged)
     return merged
+
+
+def _migrate_embedding(emb: dict[str, Any]) -> None:
+    """把旧的单套 embedding 配置迁移成 cloud/ollama 双套（幂等）。
+
+    旧数据只有顶层 provider/model/api_key/dim，没有 cloud/ollama 子对象；
+    此时把顶层这套复制到两边的子对象里作为初始值，保证切换时两边都有记忆。
+    """
+    for mode in ("cloud", "ollama"):
+        sub = emb.get(mode)
+        if not isinstance(sub, dict):
+            sub = {}
+            emb[mode] = sub
+        for key in ("provider", "api_key", "model", "dim"):
+            # 子对象缺的字段用顶层当前值补齐；顶层缺则用 DEFAULT 兜底
+            if key not in sub:
+                default = DEFAULT_CONFIG["embedding"][mode][key]
+                sub[key] = emb.get(key, default)
+        # 本地 Ollama 免 Key：迁移时别把云端密钥带进 ollama 子对象
+        if mode == "ollama":
+            sub["api_key"] = ""
+
+
+def _split_embedding(patch_emb: dict[str, Any]) -> dict[str, Any]:
+    """保存 embedding 时：把顶层当前值同步进 mode 对应的子对象。
+
+    前端提交的 payload 里 mode 即当前选中的运行方式，顶层 provider/model/dim/api_key
+    是这套的值；把它们写回 emb[mode]，另一套的缓存保持不变。
+    """
+    out = dict(patch_emb)
+    mode = out.get("mode") or "cloud"
+    sub = dict(out.get(mode) or {})
+    for key in ("provider", "model", "dim"):
+        if key in out:
+            sub[key] = out[key]
+    # api_key：空/掩码 = 保留子对象里已存的密钥（与顶层 api_key 保留逻辑一致）
+    ak = out.get("api_key")
+    if ak and ak != API_KEY_MASK:
+        sub["api_key"] = ak
+    out[mode] = sub
+    return out
 
 
 def save_many(conn, patch: dict[str, Any]) -> list[str]:
@@ -86,6 +141,7 @@ def save_many(conn, patch: dict[str, Any]) -> list[str]:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     saved: list[str] = []
     current = {r["key"]: json.loads(r["value_json"]) for r in conn.execute("SELECT key, value_json FROM config")}
+    emb_model_changed: tuple[str, str] | None = None
 
     for key, value in patch.items():
         if key in ("llm", "embedding") and isinstance(value, dict):
@@ -93,6 +149,14 @@ def save_many(conn, patch: dict[str, Any]) -> list[str]:
             if not value.get("api_key") or value.get("api_key") == API_KEY_MASK:
                 # 掩码/空值 = 保留原密钥，密钥永不被前端写回
                 value["api_key"] = old.get("api_key", "")
+        if key == "embedding" and isinstance(value, dict):
+            # 记录向量模型是否变化：变了就要清空旧向量、全部笔记/手册标待索引（R4 维度一致性）
+            old_model = (current.get("embedding") or {}).get("model") or ""
+            new_model = (value.get("model") or "").strip()
+            if new_model and new_model != old_model:
+                emb_model_changed = (old_model, new_model)
+            # 把顶层当前值同步进 mode 对应子对象，保证 cloud/ollama 双套各自记忆
+            value = _split_embedding(value)
         merged = {**current.get(key, {}), **value} if isinstance(value, dict) else value
         # 检索/切分参数写库前先钳：前端已钳过一遍，这里兜住直接打 API 的调用方
         if key == "retrieval" and isinstance(merged, dict):
@@ -105,7 +169,10 @@ def save_many(conn, patch: dict[str, Any]) -> list[str]:
         saved.append(key)
 
     conn.commit()
-    broker.publish("config.updated", {"keys": saved})
+    event: dict[str, Any] = {"keys": saved}
+    if emb_model_changed is not None:
+        event["embedding_model_changed"] = {"old": emb_model_changed[0], "new": emb_model_changed[1]}
+    broker.publish("config.updated", event)
     return saved
 
 
@@ -169,3 +236,13 @@ def _mask_secrets(cfg: dict[str, Any]) -> None:
         section["api_key_masked"] = API_KEY_MASK if api_key else ""
         section["api_key_set"] = bool(api_key)
         section.pop("api_key", None)  # 明文密钥不返回前端
+        # embedding 的 cloud/ollama 子对象里也各存了一份密钥，同样脱敏
+        if key == "embedding":
+            for mode in ("cloud", "ollama"):
+                sub = section.get(mode)
+                if not isinstance(sub, dict):
+                    continue
+                sub_api = sub.get("api_key") or ""
+                sub["api_key_masked"] = API_KEY_MASK if sub_api else ""
+                sub["api_key_set"] = bool(sub_api)
+                sub.pop("api_key", None)

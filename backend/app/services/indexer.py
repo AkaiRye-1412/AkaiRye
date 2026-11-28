@@ -212,6 +212,48 @@ def _ensure_vec_dim(conn, dim: int) -> bool:
     return True
 
 
+def invalidate_stale_index(conn, new_model_id: str) -> dict:
+    """更换向量模型后：清空全部旧索引、把笔记/手册标记为「待索引」（R4 维度一致性）。
+
+    触发：config_service.save_many 保存 embedding 且 model 变化时，经 config.updated
+    事件（embedding_model_changed）由 main._on_config_updated 调用本函数。
+
+    行为（彻底清空，只能重新索引）：
+    - 清空 chunk / chunk_fts / chunk_vec 三件套（旧模型的块与新模型不可比，必须重切+重嵌入）；
+    - rag_citation 的 chunk_id 脱钩（引用展示靠自带 snippet/source_name，不依赖 chunk 行）；
+    - note_file.indexed_status 从 ready → pending；manual.status 从 ready → discovered（待入库）；
+    - 广播 index.updated 让前端刷新。
+
+    返回 {notes, manuals, chunks} 受影响计数，供日志与排查。
+    """
+    notes = conn.execute(
+        "UPDATE note_file SET indexed_status='pending', last_error=NULL WHERE indexed_status='ready'"
+    ).rowcount
+    # manual.status 无 'pending' 态（CHECK 约束 8 态），「待入库」用 discovered
+    manuals = conn.execute(
+        "UPDATE manual SET status='discovered', progress=0, error=NULL WHERE status='ready'"
+    ).rowcount
+    # 溯源引用先脱钩，再清三件套（chunk_vec 按 chunk 的 rowid 全删，沿用 spike 验证的 DELETE 口径）
+    chunks = conn.execute("SELECT COUNT(*) c FROM chunk").fetchone()["c"]
+    conn.execute("UPDATE rag_citation SET chunk_id=NULL WHERE chunk_id IS NOT NULL")
+    conn.execute("DELETE FROM chunk_vec WHERE rowid IN (SELECT id FROM chunk)")
+    conn.execute("DELETE FROM chunk_fts WHERE chunk_id IN (SELECT id FROM chunk)")
+    conn.execute("DELETE FROM chunk")
+    conn.commit()
+    broker.publish("index.updated", {
+        "reason": "embedding_model_changed",
+        "model_id": new_model_id,
+        "notes": notes,
+        "manuals": manuals,
+        "chunks": chunks,
+    })
+    logger.info(
+        "向量模型切换为 %s：清空 %s 条旧块，%s 篇笔记 / %s 本手册标记待索引",
+        new_model_id, chunks, notes, manuals,
+    )
+    return {"notes": notes, "manuals": manuals, "chunks": chunks}
+
+
 # ---- 三件套事务操作（03 文档 3.4） ------------------------------------------
 
 def _delete_chunks(conn, note_path: str) -> int:
