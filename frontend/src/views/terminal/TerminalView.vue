@@ -118,6 +118,39 @@ function buildRuntime(tab: TerminalTab): TabRuntime {
       rt.ws.send(JSON.stringify({ type: 'input', data: cleaned }))
     }
   })
+  // Ctrl+C / Ctrl+V 快捷键处理：webview 环境下浏览器默认行为不可靠（尤其 Ctrl+C 复制
+  // 与 Ctrl+V 粘贴），这里显式接管，保证终端内复制粘贴可用。
+  term.attachCustomKeyEventHandler((ev) => {
+    if (ev.type !== 'keydown') return true
+    const ctrl = ev.ctrlKey && !ev.altKey && !ev.metaKey
+    // Ctrl+C：有选区 → 复制选区；无选区 → 交给 xterm 发送 \x03（中断前台进程）
+    if (ctrl && ev.key.toLowerCase() === 'c') {
+      const sel = rt.term.getSelection()
+      if (sel) {
+        void navigator.clipboard.writeText(sel).catch(() => {
+          // 剪贴板 API 不可用时回退：手动触发 copy 事件
+          const ta = document.createElement('textarea')
+          ta.value = sel
+          document.body.appendChild(ta)
+          ta.select()
+          document.execCommand('copy')
+          document.body.removeChild(ta)
+        })
+        return false // 阻止默认，避免把 \x03 发到 shell
+      }
+      return true // 无选区，让 xterm 发送中断信号
+    }
+    // Ctrl+V：读取剪贴板并粘贴到终端（发送给后端 PTY）
+    if (ctrl && ev.key.toLowerCase() === 'v') {
+      void navigator.clipboard.readText().then((text) => {
+        if (text) rt.term.paste(text)
+      }).catch(() => {
+        /* 剪贴板读取失败则忽略，用户仍可用右键粘贴 */
+      })
+      return false
+    }
+    return true
+  })
   const rt: TabRuntime = {
     tab,
     term,
@@ -136,6 +169,16 @@ function buildRuntime(tab: TerminalTab): TabRuntime {
 function wsUrl(tabId: string): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   return `${proto}://${location.host}/ws/terminal/${tabId}`
+}
+
+// 右键 / 系统粘贴：监听终端容器的 paste 事件，把剪贴板文本喂给 xterm（触发 onData 发到后端）。
+// webview 里浏览器原生 paste 有时不落到 xterm 的 textarea，这里显式兜底。
+function bindPaste(rt: TabRuntime, host: HTMLElement) {
+  host.addEventListener('paste', (e: Event) => {
+    const ce = e as ClipboardEvent
+    const text = ce.clipboardData?.getData('text') ?? ''
+    if (text) rt.term.paste(text)
+  })
 }
 
 // 写入终端输出：直接交给 xterm 自然渲染。
@@ -157,6 +200,7 @@ async function activate(rt: TabRuntime) {
     if (host) {
       rt.term.open(host)
       rt.opened = true
+      bindPaste(rt, host)
     }
   }
   // 只有 xterm 已 open 到 DOM 时才做 fit/focus；未 open（如首次自动建标签、
@@ -310,6 +354,7 @@ function onHostMounted(tabId: string, el: unknown) {
     if (rt && activeId.value === tabId && !rt.opened) {
       rt.term.open(el)
       rt.opened = true
+      bindPaste(rt, el)
       fitAndObserve(rt)
       rt.term.focus()
       ensureWs(rt)
