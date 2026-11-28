@@ -4,8 +4,8 @@
  * 左侧个人信息卡 + 导航 + Vault 卡 → 顶栏（页面标题 / 终端 / 新建笔记）
  * → 主区（路由视图）+ 右侧 C1 RAG 常驻面板（Q-02：所有页面常驻）。
  */
-import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { eventsSocket } from '@/api/ws'
 import { useConfigStore } from '@/stores/config'
 import { useDraftsStore } from '@/stores/drafts'
@@ -13,12 +13,10 @@ import { useRagStore } from '@/stores/rag'
 import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
 import DraftsPanel from '@/components/DraftsPanel.vue'
-import MemoCreateModal from '@/components/MemoCreateModal.vue'
 import RagPanel from '@/rag/RagPanel.vue'
 import { USER_NAME } from '@/utils/profile'
 
 const route = useRoute()
-const router = useRouter()
 const configStore = useConfigStore()
 const rag = useRagStore()
 const drafts = useDraftsStore()
@@ -58,12 +56,6 @@ const configOk = computed(() => !!configStore.status?.config_complete)
 // 滚动条，导致 xterm fit 出的 rows 偏小、提示符贴底、滚动条行为异常（与 xterm 内层
 // 滚动条冲突）。终端铺满后 .term-page 精确填满可视高度，fit 才能算准。
 const isHome = computed(() => route.name === 'home' || route.name === 'terminal')
-
-// 顶栏「新建笔记」（「1」入口）＝ 新建个人笔记：打开全局弹窗，写到任意磁盘位置。
-const showMemoCreate = ref(false)
-function newNote() {
-  showMemoCreate.value = true
-}
 
 /**
  * 右侧 dock 只有一个槽位：知识助手与草稿箱互斥，开一个必须收另一个。
@@ -219,12 +211,6 @@ watch(
         </div>
 
         <div class="topbar-actions">
-          <button class="btn ghost" @click="router.push('/terminal')">
-            <Icon name="terminal" :size="15" /><span class="btn-label">终端</span>
-          </button>
-          <button class="btn primary" @click="newNote">
-            <Icon name="plus" :size="15" /><span class="btn-label">新建笔记</span>
-          </button>
         </div>
       </header>
 
@@ -249,9 +235,6 @@ watch(
         </aside>
       </div>
     </div>
-
-    <!-- 全局「新建个人笔记」弹窗（顶栏「新建笔记」按钮触发） -->
-    <MemoCreateModal :open="showMemoCreate" @close="showMemoCreate = false" />
 
     <!-- 全局轻提示：ui.toast() 的渲染宿主（此前只写状态、无处渲染，导致提示静默丢失） -->
     <div v-if="ui.toasts.length" class="toast-host" aria-live="polite">

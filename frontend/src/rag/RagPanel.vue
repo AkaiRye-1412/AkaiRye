@@ -183,7 +183,6 @@ async function onClearCurrent() {
     ui.toast('info', '回答生成中，请稍后再清空')
     return
   }
-  if (!window.confirm('清空当前会话的全部消息？会话本身保留，此操作不可恢复。')) return
   const cleared = await rag.clearCurrentSession()
   ui.toast('success', `已清空当前会话（${cleared} 条消息）`)
 }
