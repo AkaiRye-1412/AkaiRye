@@ -4,23 +4,29 @@
  * 左侧个人信息卡 + 导航 + Vault 卡 → 顶栏（页面标题 / 终端 / 新建笔记）
  * → 主区（路由视图）+ 右侧 C1 RAG 常驻面板（Q-02：所有页面常驻）。
  */
-import { computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { eventsSocket } from '@/api/ws'
 import { useConfigStore } from '@/stores/config'
 import { useDraftsStore } from '@/stores/drafts'
-import { useRagStore } from '@/stores/rag'
+import { useRagStore, type ScopeMode } from '@/stores/rag'
+import { useShortcutsStore } from '@/stores/shortcuts'
 import { useUiStore } from '@/stores/ui'
+import { matchesCombo } from '@/utils/shortcuts'
 import Icon from '@/components/Icon.vue'
 import DraftsPanel from '@/components/DraftsPanel.vue'
 import RagPanel from '@/rag/RagPanel.vue'
+import ShortcutSettings from '@/components/ShortcutSettings.vue'
 import { USER_NAME } from '@/utils/profile'
 
 const route = useRoute()
+const router = useRouter()
 const configStore = useConfigStore()
 const rag = useRagStore()
 const drafts = useDraftsStore()
+const shortcuts = useShortcutsStore()
 const ui = useUiStore()
+const shortcutOpen = ref(false)
 
 const NAV_MAIN = [
   { to: '/', label: '首页', icon: 'home', name: 'home' },
@@ -84,6 +90,70 @@ watch(
 )
 
 /**
+ * 知识助手的检索范围：默认 Ctrl+K 依次循环 当前笔记 → 当前项目 → 全部。
+ * 与面板上那三个分段按钮是同一份状态（rag.scopeMode），只是给了一个不用摸鼠标的入口。
+ */
+const SCOPE_CYCLE: readonly ScopeMode[] = ['current', 'project', 'all']
+
+function cycleScope() {
+  // scopeMode 若是列表外的档（brand），indexOf 为 -1，+1 后正好落回第一档
+  const next = SCOPE_CYCLE[(SCOPE_CYCLE.indexOf(rag.scopeMode) + 1) % SCOPE_CYCLE.length]
+  rag.scopeMode = next
+  // 面板收着的时候切了也看不见，顺手展开
+  if (!rag.panelOpen) openDock('rag')
+  // 不弹 toast：面板顶部的分段高亮 + 下方范围提示已经是即时反馈，
+  // 连按几次只会在左侧堆一列提示，反而挡住内容
+}
+
+/**
+ * 打开终端（默认 Alt+3）：跳转到 /terminal。
+ * 已经在终端页时不动——重推同一个路由没有意义，还可能打断正在跑的输出。
+ */
+function openTerminal() {
+  if (route.name !== 'terminal') void router.push('/terminal')
+}
+
+/**
+ * 右侧 dock 的键盘操作：
+ *   切换（默认 Alt+1）：知识助手 ⇄ 草稿箱；两个都收起时打开知识助手（默认面板）。
+ *   收起（默认 Alt+2）：不分当前是哪个，一律收起。
+ * 具体键位来自 config.shortcuts，可在「快捷键」弹窗里改。
+ */
+function toggleDock() {
+  openDock(rag.panelOpen ? 'drafts' : 'rag')
+}
+
+/** 草稿箱走 closePanel（先 flush 落盘再收起），别直接改 panelOpen——
+ *  那会绕过"停笔 0.8s 自动保存"的补写，最后几秒敲的字可能没进文件。 */
+function closeDock() {
+  if (drafts.panelOpen) void drafts.closePanel()
+  rag.panelOpen = false
+}
+
+function onShortcutKeydown(e: KeyboardEvent) {
+  // 终端里 Alt/裸数字 会被 xterm 当作 ESC 序列送给 shell（bash 的 digit-argument 等），
+  // 抢走会打乱用户正在敲的命令，故焦点在终端内时一律让路。
+  const el = document.activeElement
+  if (el instanceof Element && el.closest('.xterm')) return
+  // 快捷键弹窗打开时它自己接管录制（捕获阶段已 stopPropagation），这里不再动作
+  if (shortcutOpen.value) return
+  const b = shortcuts.bindings
+  if (matchesCombo(e, b.cycle_scope)) {
+    e.preventDefault()
+    cycleScope()
+  } else if (matchesCombo(e, b.open_terminal)) {
+    e.preventDefault()
+    openTerminal()
+  } else if (matchesCombo(e, b.toggle_dock)) {
+    e.preventDefault()
+    toggleDock()
+  } else if (matchesCombo(e, b.close_dock)) {
+    e.preventDefault()
+    closeDock()
+  }
+}
+
+/**
  * 设置页改了「草稿箱索引位置」：先把当前这张纸存回旧目录，再换成空白纸。
  * 否则面板还指着旧目录，之后每次写盘都会被后端按"路径越出草稿箱目录"拒掉。
  * （首次读到配置只记基线，不搬动纸面——那时面板正在决定显示哪张纸。）
@@ -113,7 +183,12 @@ onMounted(() => {
   configStore.load()
   // 刷新前停在草稿箱：知识助手默认展开的状态要让位（否则两个都算"打开"）
   if (drafts.panelOpen) rag.panelOpen = false
+  // 用捕获阶段：抢在任何组件/输入框的 keydown 之前判定。
+  // （快捷键弹窗的录制监听同样在捕获阶段，但它靠 shortcutOpen 判断让路，不会互相打架）
+  window.addEventListener('keydown', onShortcutKeydown, true)
 })
+
+onBeforeUnmount(() => window.removeEventListener('keydown', onShortcutKeydown, true))
 
 /**
  * 上下文随页面走：离开笔记页即清空（否则"当前笔记/客户"范围会静默沿用上一篇笔记，
@@ -195,9 +270,7 @@ watch(
           >
             数据外传说明
           </button>
-          <button class="side-link" @click="ui.toast('info', '编辑器中 Ctrl+S 保存笔记')">
-            快捷键
-          </button>
+          <button class="side-link" @click="shortcutOpen = true">快捷键</button>
         </div>
       </div>
     </aside>
@@ -223,11 +296,19 @@ watch(
           <RagPanel v-if="rag.panelOpen" />
           <DraftsPanel v-else-if="drafts.panelOpen" />
           <div v-else class="dock-rail">
-            <button class="rag-rail" title="展开知识助手" @click="openDock('rag')">
+            <button
+              class="rag-rail"
+              :title="`展开知识助手（${shortcuts.bindings.toggle_dock || '未绑定'} 切换草稿箱）`"
+              @click="openDock('rag')"
+            >
               <Icon name="sparkle" :size="17" />
               <span class="rail-label">知识助手</span>
             </button>
-            <button class="rag-rail" title="展开草稿箱" @click="openDock('drafts')">
+            <button
+              class="rag-rail"
+              :title="`展开草稿箱（${shortcuts.bindings.toggle_dock || '未绑定'} 切换知识助手）`"
+              @click="openDock('drafts')"
+            >
               <Icon name="memo" :size="17" />
               <span class="rail-label">草稿箱</span>
             </button>
@@ -235,6 +316,9 @@ watch(
         </aside>
       </div>
     </div>
+
+    <!-- 快捷键设置（左下角「快捷键」入口） -->
+    <ShortcutSettings :open="shortcutOpen" @close="shortcutOpen = false" />
 
     <!-- 全局轻提示：ui.toast() 的渲染宿主（此前只写状态、无处渲染，导致提示静默丢失） -->
     <div v-if="ui.toasts.length" class="toast-host" aria-live="polite">

@@ -37,12 +37,6 @@ const SCOPES = computed<{ value: ScopeMode; label: string }[]>(() => [
   { value: 'all', label: '全部' },
 ])
 
-const EXAMPLES = [
-  '星河纸业的张力问题怎么处理的？',
-  '介绍下 Python 集合',
-  '__main__ 是什么意思',
-]
-
 // 思考计时：思考型模型（glm 等）先产出 reasoning_content，正文可能迟 30-60s 才出现，
 // 期间气泡为空会让用户以为卡死 → 显示"深度思考中 + 秒数"
 const thinkSecs = ref(0)
@@ -118,12 +112,6 @@ async function onSend() {
   const q = draft.value.trim()
   if (!q || rag.generating) return
   draft.value = ''
-  await rag.send(q)
-  scrollToBottom()
-}
-
-async function quickAsk(q: string) {
-  if (rag.generating) return
   await rag.send(q)
   scrollToBottom()
 }
@@ -375,7 +363,7 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
               </button>
             </div>
           </div>
-          <button class="icon-btn" title="收起面板" @click="rag.panelOpen = false">
+          <button class="icon-btn" title="收起面板（Alt+2）" @click="rag.panelOpen = false">
             <Icon name="chevronRight" :size="16" />
           </button>
         </div>
@@ -460,9 +448,6 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
         <div class="empty-ic"><Icon name="sparkle" :size="20" /></div>
         <p class="empty-title">向知识库提问</p>
         <p class="empty-sub">检索范围由上方切换；回答带来源角标，可点开对应笔记。</p>
-        <div class="chips">
-          <button v-for="q in EXAMPLES" :key="q" class="chip" @click="quickAsk(q)">{{ q }}</button>
-        </div>
       </div>
 
       <template v-for="m in rag.messages" :key="m.id">
@@ -700,18 +685,6 @@ const canClear = computed(() => !!rag.messages.length || !!rag.streaming)
 }
 .empty-title { font-size: 13px; font-weight: 620; margin: 0 0 3px; color: var(--ink); }
 .empty-sub { font-size: 11.5px; line-height: 1.6; color: var(--muted); margin: 0 0 12px; max-width: 260px; }
-.chips { display: flex; flex-direction: column; gap: 6px; width: 100%; }
-.chip {
-  border: 1px solid var(--line);
-  background: #fff;
-  color: var(--ink-2);
-  border-radius: 9px;
-  padding: 7px 10px;
-  font-size: 12px;
-  text-align: left;
-  transition: border-color 0.14s, background 0.14s, color 0.14s;
-}
-.chip:hover { border-color: var(--blue-line); background: var(--blue-soft); color: var(--blue-ink); }
 
 .msg { border-radius: 10px; padding: 8px 11px; margin-bottom: 9px; line-height: 1.6; word-break: break-word; font-size: 12.5px; }
 .msg.user {

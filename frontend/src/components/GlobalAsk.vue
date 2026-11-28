@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
- * 全局提问输入框（FR-HOME-02）：Ctrl+K 聚焦，回车交给右侧知识助手作答。
+ * 全局提问输入框（FR-HOME-02）：回车交给右侧知识助手作答。
  *
  * 顶栏与首页看板共用同一份实现，避免"两处逻辑各自漂移"。
- * 同一时刻只有一个实例可见（首页隐藏顶栏那个，改由看板内提供），
- * 因此 Ctrl+K 监听不会互相抢焦点。
+ * 注意：这里**不再绑快捷键**——Ctrl+K 已让给「切换检索范围」（见 utils/shortcuts.ts），
+ * 想用键盘聚焦提问框，可在左下角「快捷键」里给其它动作分配组合键。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { useRagStore } from '@/stores/rag'
 import { useUiStore } from '@/stores/ui'
@@ -25,16 +25,6 @@ function submitAsk() {
   question.value = ''
   ui.toast('info', '已发送到右侧知识助手')
 }
-
-function onKeydown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-    e.preventDefault()
-    inputEl.value?.focus()
-  }
-}
-
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
@@ -49,7 +39,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       aria-label="全局提问"
       @keyup.enter="submitAsk"
     />
-    <span class="ask-hint"><kbd>Ctrl</kbd><kbd>K</kbd></span>
   </div>
 </template>
 

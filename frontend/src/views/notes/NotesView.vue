@@ -17,9 +17,11 @@ import { eventsSocket, notesApi } from '@/api'
 import { ApiError } from '@/api/http'
 import { useConfigStore } from '@/stores/config'
 import { useRagStore } from '@/stores/rag'
+import { useShortcutsStore } from '@/stores/shortcuts'
 import { useUiStore } from '@/stores/ui'
 import { renderMarkdown } from '@/rag/md'
 import { copyText } from '@/utils/clipboard'
+import { matchesCombo } from '@/utils/shortcuts'
 import Icon from '@/components/Icon.vue'
 
 interface NoteRow {
@@ -53,6 +55,7 @@ interface NoteDetail {
 const ui = useUiStore()
 const rag = useRagStore()
 const config = useConfigStore()
+const shortcuts = useShortcutsStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -710,7 +713,8 @@ watch(
 )
 
 function onKeydown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+  // 保存键默认 Ctrl+S，可在左下角「快捷键」里改
+  if (matchesCombo(e, shortcuts.bindings.save_note)) {
     e.preventDefault()
     if (selectedPath.value) scheduleSaveNow()
   }

@@ -326,20 +326,6 @@ a { color: inherit; text-decoration: none; }
   color: var(--ink);
 }
 .ask-box input::placeholder { color: var(--muted); }
-.ask-hint { display: flex; gap: 3px; flex: none; }
-kbd {
-  font-family: var(--font);
-  font-size: 10px;
-  color: var(--muted);
-  background: #fff;
-  border: 1px solid var(--line);
-  border-bottom-width: 2px;
-  border-radius: 5px;
-  padding: 1px 4px;
-  min-width: 17px;
-  text-align: center;
-  display: inline-block;
-}
 /* 首页顶栏不放提问框（已移入看板），靠 auto 把右侧按钮顶到最右，各页观感一致 */
 .topbar-actions { display: flex; align-items: center; gap: 8px; flex: none; margin-left: auto; }
 

@@ -63,7 +63,19 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     },
     "dashboard": {"follow_up_days": 7, "default_range": "month"},
     "backup": {"dir": "", "keep": 7},
-    "shortcuts": {"global_ask": "Ctrl+K", "new_note": "Ctrl+N", "terminal": "Ctrl+T", "send": "Enter"},
+    # 快捷键（前端「快捷键」弹窗可改；组合键存规范字符串，形如 Ctrl+K / Alt+1）
+    # cycle_scope 切换检索范围 / open_terminal 打开终端 / toggle_dock 知识助手⇄草稿箱
+    # close_dock 收起右侧面板 / save_note 保存笔记
+    # new_note、send 为预留键（前端暂未接线，保留以免旧配置被抹掉）
+    "shortcuts": {
+        "cycle_scope": "Ctrl+K",
+        "open_terminal": "Alt+3",
+        "toggle_dock": "Alt+1",
+        "close_dock": "Alt+2",
+        "save_note": "Ctrl+S",
+        "new_note": "Ctrl+N",
+        "send": "Enter",
+    },
 }
 
 

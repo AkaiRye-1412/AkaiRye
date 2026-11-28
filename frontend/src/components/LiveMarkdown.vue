@@ -12,7 +12,9 @@
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { renderMarkdown } from '@/rag/md'
+import { useShortcutsStore } from '@/stores/shortcuts'
 import { copyText } from '@/utils/clipboard'
+import { matchesCombo } from '@/utils/shortcuts'
 
 const props = defineProps<{
   modelValue: string
@@ -23,6 +25,8 @@ const emit = defineEmits<{
   'update:modelValue': [string]
   save: []
 }>()
+
+const shortcuts = useShortcutsStore()
 
 interface Block {
   id: number
@@ -280,8 +284,8 @@ function listContext(line: string): { indent: string; prefix: string; rest: stri
 }
 
 function onKeydown(ev: KeyboardEvent, i: number) {
-  // Ctrl+S：立刻落盘（保存仍由 store 防抖负责）
-  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') {
+  // 保存键（默认 Ctrl+S，可在「快捷键」里改）：立刻落盘（保存仍由 store 防抖负责）
+  if (matchesCombo(ev, shortcuts.bindings.save_note)) {
     ev.preventDefault()
     emit('save')
     return

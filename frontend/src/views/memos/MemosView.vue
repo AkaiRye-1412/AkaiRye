@@ -13,8 +13,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { eventsSocket, memosApi, notesApi } from '@/api'
 import { ApiError } from '@/api/http'
 import { useUiStore } from '@/stores/ui'
+import { useShortcutsStore } from '@/stores/shortcuts'
 import { renderMarkdown } from '@/rag/md'
 import { copyText } from '@/utils/clipboard'
+import { matchesCombo } from '@/utils/shortcuts'
 import Icon from '@/components/Icon.vue'
 import MemoCreateModal from '@/components/MemoCreateModal.vue'
 
@@ -39,6 +41,7 @@ interface MemoDetail {
 const route = useRoute()
 const router = useRouter()
 const ui = useUiStore()
+const shortcuts = useShortcutsStore()
 
 /* ---------------- 列表 ---------------- */
 const memos = ref<MemoRow[]>([])
@@ -568,7 +571,8 @@ async function onNoteChanged(p: { path: string; change: string }) {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+  // 保存键默认 Ctrl+S，可在左下角「快捷键」里改
+  if (matchesCombo(e, shortcuts.bindings.save_note)) {
     e.preventDefault()
     if (selectedPath.value) scheduleSaveNow()
   }

@@ -125,7 +125,7 @@ async function close() {
           <button class="icon-btn" title="新建一页" @click.stop="onNew">
             <Icon name="plus" :size="16" />
           </button>
-          <button class="icon-btn" title="收起面板" @click.stop="close">
+          <button class="icon-btn" title="收起面板（Alt+2）" @click.stop="close">
             <Icon name="chevronRight" :size="16" />
           </button>
         </div>
