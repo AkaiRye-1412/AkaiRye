@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 随手笔记（「1」顶栏入口的对应页面）：独立于售后笔记。
+ * 个人笔记（「1」顶栏入口的对应页面）：独立于售后笔记。
  * 简单格式（标题 + 正文），存放在电脑任意绝对路径，通过 note_type='memo' 区分。
  *
  * 版式与售后笔记一致：左侧列表常驻，点行在右栏展开阅读（只读渲染为默认），
@@ -86,7 +86,7 @@ function folderLabel(dir: string): string {
 }
 
 /** 按文件夹分组：组内按最近更新倒序；组之间按「该组最新一篇」倒序——
- *  随手笔记的主要用法是「接着上次的看」，这样刚改过的目录永远在最上面，
+ *  个人笔记的主要用法是「接着上次的看」，这样刚改过的目录永远在最上面，
  *  同一时间点再按目录名排，顺序稳定。
  *  为什么要分组：笔记散落在各个目录，平铺时只能靠每行的灰色目录行辨认，
  *  列表一长就分不清边界；分组后目录名提到组头，行内只剩标题，反而更清爽。 */
@@ -325,7 +325,7 @@ function applyDetail(info: MemoDetail) {
   }
   frontPrefix.value = prefix
   body.value = rest
-  // 随手笔记以 frontmatter 的 title 作为标题（列表同口径），没有才回退列表标题
+  // 个人笔记以 frontmatter 的 title 作为标题（列表同口径），没有才回退列表标题
   titleDraft.value = (info.fields?.title || info.note_title || '').trim()
   baseTitle.value = titleDraft.value
   metaTags.value = [...(info.tags || [])]
@@ -339,7 +339,7 @@ function applyDetail(info: MemoDetail) {
 
 async function openMemo(path: string) {
   if (path === selectedPath.value) return
-  if (dirty.value && !window.confirm('当前随手记有未保存修改，切换将丢弃，确定？')) return
+  if (dirty.value && !window.confirm('当前个人笔记有未保存修改，切换将丢弃，确定？')) return
   loadingNote.value = true
   try {
     const info = (await notesApi.get(path)) as MemoDetail
@@ -349,14 +349,14 @@ async function openMemo(path: string) {
     await nextTick()
     if (rightMode.value === 'edit') editorEl.value?.focus()
   } catch (e) {
-    ui.toast('error', `打开随手记失败：${(e as Error).message}`)
+    ui.toast('error', `打开个人笔记失败：${(e as Error).message}`)
   } finally {
     loadingNote.value = false
   }
 }
 
 function closeMemo(confirmDirty = true) {
-  if (confirmDirty && dirty.value && !window.confirm('当前随手记有未保存修改，返回列表将丢弃，确定？')) return
+  if (confirmDirty && dirty.value && !window.confirm('当前个人笔记有未保存修改，返回列表将丢弃，确定？')) return
   dirty.value = false
   conflict.value = false
   selectedPath.value = ''
@@ -532,7 +532,7 @@ async function onNoteChanged(p: { path: string; change: string }) {
   if (p.path === selectedPath.value) {
     if (p.change === 'deleted') {
       if (!dirty.value) {
-        ui.toast('warn', '这篇随手记已被删除')
+        ui.toast('warn', '这篇个人笔记已被删除')
         closeMemo(false)
       }
     } else if (!dirty.value) {
@@ -582,7 +582,7 @@ onUnmounted(() => {
     <section class="card memos-card">
       <header class="card-head memos-head">
         <div class="card-title">
-          <h2>随手笔记</h2>
+          <h2>个人笔记</h2>
           <span class="count-pill">{{ filtered.length }}</span>
         </div>
         <div class="memos-tools">
@@ -594,7 +594,7 @@ onUnmounted(() => {
             </button>
           </div>
           <button class="btn primary sm" @click="showCreate = true">
-            <Icon name="plus" :size="14" /><span>新建随手记</span>
+            <Icon name="plus" :size="14" /><span>新建个人笔记</span>
           </button>
         </div>
       </header>
@@ -609,8 +609,8 @@ onUnmounted(() => {
         </div>
         <div v-else-if="!filtered.length" class="empty-block">
           <div class="empty-ic"><Icon :name="memos.length ? 'search' : 'notes'" :size="26" /></div>
-          <p>{{ memos.length ? '没有匹配的随手记' : '还没有随手记' }}</p>
-          <span class="empty-sub">点右上角「新建随手记」，写到电脑任意位置</span>
+          <p>{{ memos.length ? '没有匹配的个人笔记' : '还没有个人笔记' }}</p>
+          <span class="empty-sub">点右上角「新建个人笔记」，写到电脑任意位置</span>
         </div>
         <template v-else>
           <template v-for="g in grouped" :key="g.dir">
@@ -654,7 +654,7 @@ onUnmounted(() => {
                 </div>
                 <div class="mr-act" @click.stop>
                   <Icon class="mr-go-ic" name="chevronRight" :size="15" />
-                  <button class="mr-del" title="删除随手记（移入回收目录，可还原）" @click.stop="removeMemo(m.path)">
+                  <button class="mr-del" title="删除个人笔记（移入回收目录，可还原）" @click.stop="removeMemo(m.path)">
                     <Icon name="trash" :size="14" />
                   </button>
                 </div>
@@ -672,14 +672,14 @@ onUnmounted(() => {
       </footer>
     </section>
 
-    <!-- ==================== 右：当前随手记 ==================== -->
+    <!-- ==================== 右：当前个人笔记 ==================== -->
     <section v-if="selectedPath" class="memo-detail">
       <div class="note-topbar">
         <div class="note-crumb">
           <button class="icon-btn" title="关闭右栏（回到纯列表）" @click="closeMemo()">
             <Icon name="x" :size="16" />
           </button>
-          <span class="crumb-note">随手笔记</span>
+          <span class="crumb-note">个人笔记</span>
           <Icon name="chevronRight" :size="12" />
           <span class="crumb-current" :title="selectedPath">{{ titleDraft.trim() || rowTitle(selected) || selectedPath }}</span>
         </div>
@@ -694,7 +694,7 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div v-if="loadingNote" class="note-loading">正在读取随手记…</div>
+      <div v-if="loadingNote" class="note-loading">正在读取个人笔记…</div>
 
       <template v-else-if="detail">
         <div v-if="conflict" class="conflict-bar">

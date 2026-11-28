@@ -10,7 +10,7 @@
  * - 保存后热生效（config.updated 广播）。
  */
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { configApi, kbApi, reposApi, type Brand, type KbStats } from '@/api'
+import { configApi, kbApi, ollamaApi, reposApi, type Brand, type KbStats, type OllamaModel } from '@/api'
 import { ApiError } from '@/api/http'
 import { useConfigStore } from '@/stores/config'
 import { useUiStore } from '@/stores/ui'
@@ -48,25 +48,86 @@ const llm = reactive({
   temperature: 0.7,
 })
 const embedding = reactive({ mode: 'cloud', provider: '', api_key: '', model: '', dim: 0 })
+
+/* ---- 本地 Ollama：扫描本机模型（设置页「本地自托管」） ---- */
+const ollamaModels = ref<OllamaModel[]>([])
+const ollamaState = reactive({ loading: false, running: null as boolean | null, text: '' })
+
+/** Ollama 的模型列表会给无 tag 的模型补 `:latest`，比较时忽略它，免得下拉里出现两个“当前” */
+function sameModel(a: string, b: string) {
+  const norm = (s: string) => s.trim().replace(/:latest$/, '')
+  return norm(a) === norm(b)
+}
+
+const pickedOllama = computed(
+  () => ollamaModels.value.find((m) => sameModel(m.name, embedding.model)) ?? null,
+)
+/** 选中的本机模型缺 pooling 元数据：Ollama 会拒绝 /api/embed，得先提示 */
+const ollamaUnsupported = computed(
+  () => embedding.mode === 'ollama' && !!pickedOllama.value && !pickedOllama.value.embedding,
+)
+
+async function loadOllamaModels(silent = false) {
+  if (ollamaState.loading) return
+  ollamaState.loading = true
+  try {
+    const r = await ollamaApi.models(embedding.provider.trim())
+    ollamaState.running = r.running
+    ollamaModels.value = r.models
+    if (r.running) {
+      const usable = r.models.filter((m) => m.embedding)
+      ollamaState.text = `本机共 ${r.models.length} 个模型，其中 ${usable.length} 个可用于向量化`
+      if (!embedding.provider.trim()) embedding.provider = r.base_url
+      // 存量配置常写成不带 tag 的名字（qwen3-embed-8b），而列表里是 qwen3-embed-8b:latest，
+      // 归一化到列表里的写法，下拉才不会显示成空白
+      const hit = r.models.find((m) => sameModel(m.name, embedding.model))
+      if (hit && hit.name !== embedding.model.trim()) embedding.model = hit.name
+    } else {
+      ollamaState.text = r.error || '未检测到本机 Ollama'
+    }
+  } catch (e) {
+    ollamaState.running = false
+    ollamaState.text = (e as Error).message
+    if (!silent) ui.toast('error', `扫描本机模型失败：${(e as Error).message}`)
+  } finally {
+    ollamaState.loading = false
+  }
+}
+
+function setEmbMode(mode: 'cloud' | 'ollama') {
+  embedding.mode = mode
+  if (mode === 'ollama') {
+    if (!embedding.provider.trim()) embedding.provider = 'http://127.0.0.1:11434/v1'
+    void loadOllamaModels(true)
+  }
+}
+
+/** 选了本机模型：维度按模型元数据回填（仍可手改） */
+function onPickOllamaModel() {
+  const hit = pickedOllama.value
+  if (hit?.dim) embedding.dim = hit.dim
+}
 const paths = reactive({
   vault_root: '',
   notes_folder: '',
   pdf_root: '',
   code_roots: [] as string[],
-  // 5 类索引位置（各最多 3 个，第 1 个为主位置）
+  // 索引位置（售后/个人/PDF/数据库/项目开发各最多 3 个，第 1 个为主位置；草稿箱单目录）
   after_sales_roots: [] as string[],
   memo_roots: [] as string[],
   pdf_roots: [] as string[],
   db_roots: [] as string[],
+  draft_roots: [] as string[],
 })
 
-/** 索引位置分组（设置页按这 5 组展示，每组最多 3 个位置） */
+/** 索引位置分组（设置页按这些组展示；草稿箱只允许 1 个目录） */
 type RootGroupKey =
   | 'after_sales_roots'
   | 'memo_roots'
   | 'pdf_roots'
   | 'db_roots'
   | 'code_roots'
+  | 'draft_roots'
 
 const ROOT_GROUPS: {
   key: RootGroupKey
@@ -74,6 +135,10 @@ const ROOT_GROUPS: {
   icon: string
   hint: string
   placeholder: string
+  /** 允许的位置个数，默认 3（草稿箱是单目录） */
+  max?: number
+  /** 头部徽标文字，默认「最多 3 个」 */
+  badge?: string
 }[] = [
   {
     key: 'after_sales_roots',
@@ -84,10 +149,10 @@ const ROOT_GROUPS: {
   },
   {
     key: 'memo_roots',
-    label: '随手笔记索引位置',
+    label: '个人笔记索引位置',
     icon: 'memo',
-    hint: '新建随手记默认写第 1 个位置；全部位置参与扫描与索引。',
-    placeholder: 'D:\\Notes\\随手笔记',
+    hint: '新建个人笔记默认写第 1 个位置；全部位置参与扫描与索引。',
+    placeholder: 'D:\\Notes\\个人笔记',
   },
   {
     key: 'pdf_roots',
@@ -110,10 +175,23 @@ const ROOT_GROUPS: {
     hint: '自动递归发现各根目录下的 .git 仓库。',
     placeholder: 'D:\\Code',
   },
+  {
+    key: 'draft_roots',
+    label: '草稿箱索引位置',
+    icon: 'edit',
+    max: 1,
+    badge: '单目录',
+    hint: '右侧「草稿箱」面板的速记写在这里。留空 = 「个人笔记」第 1 个位置下的 草稿箱/ 子目录；速记不进笔记列表、也不进知识库索引。',
+    placeholder: 'D:\\Notes\\草稿箱',
+  },
 ]
 
 function rootsOf(key: RootGroupKey): string[] {
   return paths[key]
+}
+
+function maxOf(key: RootGroupKey): number {
+  return ROOT_GROUPS.find((g) => g.key === key)?.max ?? 3
 }
 
 /**
@@ -151,8 +229,9 @@ async function pickFolder(): Promise<PickResult> {
 }
 
 async function addRoot(key: RootGroupKey) {
-  if (paths[key].length >= 3) {
-    ui.toast('warn', '每类最多 3 个索引位置')
+  const max = maxOf(key)
+  if (paths[key].length >= max) {
+    ui.toast('warn', max === 1 ? '该项只能配置 1 个位置' : `每类最多 ${max} 个索引位置`)
     return
   }
   const r = await pickFolder()
@@ -224,6 +303,12 @@ const missingText = computed(() => {
   return (status.value?.missing_config_keys ?? []).map((k) => map[k] ?? k).join('、')
 })
 
+const embReady = computed(() =>
+  embedding.mode === 'ollama'
+    ? !!embedding.model.trim()
+    : !!cfg.value?.embedding?.api_key_set,
+)
+
 const embDimMismatch = computed(() => {
   const actual = kbStats.value?.vector_model?.dim
   const configured = Number(embedding.dim) || 0
@@ -259,13 +344,13 @@ function embeddingPayload() {
   return p
 }
 
-function normRoots(list: string[]): string[] {
+function normRoots(list: string[], max = 3): string[] {
   const out: string[] = []
   for (const x of list) {
     const s = (x ?? '').trim()
     if (s && !out.includes(s)) out.push(s)
   }
-  return out.slice(0, 3)
+  return out.slice(0, max)
 }
 
 function pathsPayload() {
@@ -278,6 +363,8 @@ function pathsPayload() {
     memo_roots: normRoots(paths.memo_roots),
     pdf_roots: normRoots(paths.pdf_roots),
     db_roots: normRoots(paths.db_roots),
+    // 草稿箱单目录：只保留第 1 个（后端也只认第 1 个）
+    draft_roots: normRoots(paths.draft_roots, 1),
   }
 }
 
@@ -375,6 +462,8 @@ function buildPathsForm(c: Record<string, any>) {
     memo_roots: [...(raw.memo_roots ?? [])],
     pdf_roots: pdfRoots,
     db_roots: [...(raw.db_roots ?? [])],
+    // 草稿箱：只取第 1 个（旧配置可能残留多条）
+    draft_roots: [...(raw.draft_roots ?? [])].slice(0, 1),
   }
 }
 
@@ -385,6 +474,7 @@ async function loadPage() {
     await configStore.load()
     await Promise.all([refreshDbLocation(), refreshBrands()])
     syncFromStore()
+    if (embedding.mode === 'ollama') void loadOllamaModels(true)
     await refreshSide()
   } catch (e) {
     loadError.value = (e as Error).message
@@ -557,12 +647,14 @@ async function testEmbedding() {
       base_url: embedding.provider.trim(),
       api_key: embedding.api_key.trim(),
       model: embedding.model.trim(),
+      mode: embedding.mode,
     })
     if (r.ok) {
       embTest.ok = true
       const before = Number(embedding.dim) || 0
       if (r.dim) embedding.dim = r.dim
-      embTest.text = `连通正常 · ${r.latency_ms} ms · dim=${r.dim}`
+      const how = r.local ? '本地 Ollama 正常' : '连通正常'
+      embTest.text = `${how} · ${r.latency_ms} ms · dim=${r.dim}`
       if (r.dim && before && before !== r.dim) {
         ui.toast('warn', `实测维度 ${r.dim} 与已存 ${before} 不一致，保存后需重建全部索引`)
       }
@@ -797,8 +889,8 @@ const indexPct = computed(() => {
             <h3>向量化模型</h3>
             <span>笔记与 PDF 切块的索引来源</span>
           </div>
-          <span class="badge" :class="cfg.embedding?.api_key_set ? 'ok-soft' : 'warn'">
-            {{ cfg.embedding?.api_key_set ? '已配置' : '待配置' }}
+          <span class="badge" :class="embReady ? 'ok-soft' : 'warn'">
+            {{ embReady ? '已配置' : '待配置' }}
           </span>
         </header>
         <div class="cfg-body">
@@ -808,27 +900,57 @@ const indexPct = computed(() => {
               <button
                 class="seg-btn"
                 :class="{ active: embedding.mode === 'cloud' }"
-                @click="embedding.mode = 'cloud'"
+                @click="setEmbMode('cloud')"
               >
                 云端
               </button>
-              <button class="seg-btn" disabled title="本地自托管为二期规划">
-                本地自托管 <em>二期</em>
+              <button
+                class="seg-btn"
+                :class="{ active: embedding.mode === 'ollama' }"
+                @click="setEmbMode('ollama')"
+              >
+                本地 Ollama
               </button>
             </div>
           </div>
 
           <label class="field">
-            <span class="field-label">服务地址 · Base URL</span>
-            <input
-              v-model="embedding.provider"
-              class="input mono"
-              placeholder="https://ark.cn-beijing.volces.com/api/v3"
-              spellcheck="false"
-            />
+            <span class="field-label">
+              服务地址 · Base URL
+              <em v-if="embedding.mode === 'ollama'" class="field-badge">本机免 Key</em>
+            </span>
+            <div class="input-wrap">
+              <input
+                v-model="embedding.provider"
+                class="input mono"
+                :placeholder="
+                  embedding.mode === 'ollama'
+                    ? 'http://127.0.0.1:11434/v1'
+                    : 'https://ark.cn-beijing.volces.com/api/v3'
+                "
+                spellcheck="false"
+              />
+              <button
+                v-if="embedding.mode === 'ollama'"
+                class="icon-btn inner"
+                type="button"
+                :disabled="ollamaState.loading"
+                title="扫描本机 Ollama 模型"
+                @click="loadOllamaModels()"
+              >
+                <Icon name="refresh" :size="15" />
+              </button>
+            </div>
+            <span
+              v-if="embedding.mode === 'ollama' && ollamaState.text"
+              class="cfg-hint"
+              :class="{ bad: ollamaState.running === false }"
+            >
+              {{ ollamaState.text }}
+            </span>
           </label>
 
-          <label class="field">
+          <label v-if="embedding.mode === 'cloud'" class="field">
             <span class="field-label">
               API Key
               <em class="field-badge">仅本机保存</em>
@@ -860,10 +982,37 @@ const indexPct = computed(() => {
           <div class="cfg-row">
             <label class="field">
               <span class="field-label">模型名</span>
-              <input
+              <select
+                v-if="embedding.mode === 'ollama' && ollamaModels.length"
                 v-model="embedding.model"
                 class="input mono"
-                placeholder="doubao-embedding-…"
+                @change="onPickOllamaModel"
+              >
+                <option value="">选择本机模型…</option>
+                <!-- 手填的名字（如 qwen3-embed-4b 未带 :latest）不在列表里时，仍要显示为当前值 -->
+                <option
+                  v-if="
+                    embedding.model.trim() &&
+                    !ollamaModels.some((m) => sameModel(m.name, embedding.model))
+                  "
+                  :value="embedding.model.trim()"
+                >
+                  {{ embedding.model.trim() }}（当前）
+                </option>
+                <option
+                  v-for="m in ollamaModels"
+                  :key="m.name"
+                  :value="m.name"
+                  :disabled="!m.embedding"
+                >
+                  {{ m.name }}{{ m.embedding ? (m.dim ? ` · ${m.dim} 维` : '') : ' · 不支持向量化' }}
+                </option>
+              </select>
+              <input
+                v-else
+                v-model="embedding.model"
+                class="input mono"
+                :placeholder="embedding.mode === 'ollama' ? 'qwen3-embedding:4b' : 'doubao-embedding-…'"
                 spellcheck="false"
               />
             </label>
@@ -891,9 +1040,17 @@ const indexPct = computed(() => {
             <span v-if="embTest.ok !== null" class="test-result" :class="embTest.ok ? 'ok' : 'bad'">
               <span class="dot" :class="embTest.ok ? 'ok' : 'err'" />{{ embTest.text }}
             </span>
-            <span v-else class="cfg-hint">留空则用已存密钥测试</span>
+            <span v-else class="cfg-hint">
+              {{ embedding.mode === 'ollama' ? '本机模式无需密钥，直接测即可' : '留空则用已存密钥测试' }}
+            </span>
           </div>
 
+          <p v-if="ollamaUnsupported" class="cfg-note warn">
+            <Icon name="alert" :size="13" />
+            这个本机模型缺少 pooling 元数据，Ollama 会把它当对话模型、拒绝向量化请求
+            （"does not support embeddings"）。请换带 embedding 能力的模型，或先补
+            <code>qwen3.pooling_type</code> 再 <code>ollama create</code>。
+          </p>
           <p v-if="embDimMismatch" class="cfg-note warn">
             <Icon name="alert" :size="13" />
             配置维度 {{ embedding.dim }} 与索引向量维度 {{ vectorDim }} 不一致：换模型后请重建全部索引。
@@ -907,7 +1064,7 @@ const indexPct = computed(() => {
           <div class="cfg-ic amber"><Icon name="folder" :size="17" /></div>
           <div class="cfg-head-text">
             <h3>索引位置</h3>
-            <span>5 类索引位置各自可自定义、最多 3 个（第 1 个为主位置）</span>
+            <span>6 类索引位置各自可自定义（前 5 类最多 3 个，第 1 个为主位置；草稿箱为单目录）</span>
           </div>
         </header>
 
@@ -917,7 +1074,7 @@ const indexPct = computed(() => {
               <div class="loc-head">
                 <Icon :name="g.icon" :size="13" />
                 <b>{{ g.label }}</b>
-                <em class="field-badge">最多 3 个</em>
+                <em class="field-badge">{{ g.badge ?? '最多 3 个' }}</em>
               </div>
               <div class="loc-slots">
                 <div v-for="(_, i) in rootsOf(g.key)" :key="i" class="loc-slot">
@@ -942,10 +1099,12 @@ const indexPct = computed(() => {
                   </button>
                 </div>
                 <span v-if="!rootsOf(g.key).length" class="chips-empty">
-                  {{ g.key === 'after_sales_roots' || g.key === 'memo_roots' ? '未配置（使用默认位置）' : '未配置' }}
+                  {{ g.key === 'after_sales_roots' || g.key === 'memo_roots' || g.key === 'draft_roots'
+                    ? '未配置（使用默认位置）'
+                    : '未配置' }}
                 </span>
                 <button
-                  v-if="rootsOf(g.key).length < 3"
+                  v-if="rootsOf(g.key).length < maxOf(g.key)"
                   class="chip add"
                   type="button"
                   :disabled="picking"
@@ -1212,7 +1371,7 @@ const indexPct = computed(() => {
 .cfg-row .field { flex: 1; min-width: 0; }
 .cfg-row .field.narrow { flex: 0 0 118px; }
 
-/* ---------------- 5 类索引位置 ---------------- */
+/* ---------------- 索引位置 ---------------- */
 .loc-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -16,10 +16,12 @@ from app.api import (
     cleanup,
     config,
     dashboard,
+    drafts,
     kb,
     manuals,
     memos,
     notes,
+    ollama,
     pdf,
     projects,
     rag,
@@ -176,7 +178,9 @@ def create_app() -> FastAPI:
     app.include_router(dashboard.router)
     app.include_router(projects.router)
     app.include_router(notes.router)
+    app.include_router(ollama.router)
     app.include_router(memos.router)
+    app.include_router(drafts.router)
     app.include_router(kb.router)
     app.include_router(manuals.router)
     app.include_router(pdf.router)

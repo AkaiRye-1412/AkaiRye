@@ -6,6 +6,7 @@ from sqlite3 import Connection
 
 from app.api.deps import get_db
 from app.core import paths
+from app.services import embedding as embedding_service
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -33,7 +34,16 @@ def status(conn: Connection = Depends(get_db)) -> SystemStatus:
 
     cfg = load_all(conn)
     llm_ok = bool(cfg["llm"].get("api_key_set"))
-    emb_ok = bool(cfg["embedding"].get("api_key_set"))
+    # 向量化是否"已配置"：地址 + 模型名就算（本地 Ollama 不需要 Key）
+    emb_cfg = dict(cfg["embedding"])
+    emb_url = embedding_service.base_url(
+        {**emb_cfg, "base_url": emb_cfg.get("base_url") or emb_cfg.get("provider") or ""}
+    )
+    emb_ok = bool(emb_url and emb_cfg.get("model")) and (
+        emb_cfg.get("mode") == "ollama"
+        or embedding_service.is_local(emb_url)
+        or bool(emb_cfg.get("api_key_set"))
+    )
     vault_ok = _dir_valid(cfg["paths"].get("vault_root", ""))
     missing = []
     if not llm_ok:

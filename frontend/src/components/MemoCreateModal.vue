@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * 全局「新建随手记」弹窗（「1」顶栏入口）。
- * 随手笔记：写到电脑任意绝对路径，简单格式（标题 + 正文），独立于售后笔记。
+ * 全局「新建个人笔记」弹窗（「1」顶栏入口）。
+ * 个人笔记：写到电脑任意绝对路径，简单格式（标题 + 正文），独立于售后笔记。
  */
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -62,7 +62,7 @@ async function submit() {
   saving.value = true
   try {
     const row = (await memosApi.create({ title: t, body: body.value, folder: f })) as Record<string, any>
-    ui.toast('success', '已创建随手记')
+    ui.toast('success', '已创建个人笔记')
     close()
     router.push({ path: '/memos', query: { path: row.path } })
   } catch (e) {
@@ -78,7 +78,7 @@ async function submit() {
 <template>
   <div v-if="open" class="modal-mask" @click.self="close">
     <div class="modal memo-modal">
-      <h3>新建随手记</h3>
+      <h3>新建个人笔记</h3>
       <p class="modal-sub">写到电脑任意位置，不进入售后笔记列表，仅供随手记录。</p>
 
       <label class="modal-field">
@@ -102,7 +102,7 @@ async function submit() {
           <input
             v-model="folder"
             class="input mono"
-            placeholder="如：D:/我的笔记 或 C:/Users/我/Desktop/随手记"
+            placeholder="如：D:/我的笔记 或 C:/Users/我/Desktop/个人笔记"
             spellcheck="false"
             autocomplete="off"
           />

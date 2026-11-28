@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlite3 import Connection
 
 from app.api.deps import get_db
-from app.services import config_service
+from app.services import config_service, embedding
 
 router = APIRouter(prefix="/api", tags=["config"])
 
@@ -34,6 +34,7 @@ class EmbeddingTestIn(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    mode: str = ""      # cloud / ollama；留空沿用已存配置
 
 
 def _resolve(base: str, key: str, stored: dict) -> tuple[str, str]:
@@ -75,24 +76,31 @@ def test_llm(body: LlmTestIn, conn: Connection = Depends(get_db)) -> dict:
 
 @router.post("/config/test-embedding")
 def test_embedding(body: EmbeddingTestIn, conn: Connection = Depends(get_db)) -> dict:
-    """测试 Embedding 连通，成功返回实际维度 dim（供 R4 校验比对）。"""
+    """测试 Embedding 连通，成功返回实际维度 dim（供 R4 校验比对）。
+
+    本地 Ollama 不需要 API Key（地址缺 /v1 时自动补），云端仍要求密钥。
+    """
     import time as _time
 
     stored = config_service.get_raw(conn, "embedding")
-    base_url, api_key = _resolve(body.base_url, body.api_key, stored)
+    mode = body.mode or stored.get("mode") or "cloud"
+    raw_base, api_key = _resolve(body.base_url, body.api_key, stored)
     model = body.model or stored.get("model") or ""
-    if not (base_url and api_key and model):
-        return {"ok": False, "error": "base_url / api_key / model 未配置完整"}
+    base_url = embedding.base_url({"mode": mode, "base_url": raw_base})
+    local = embedding.is_local(base_url)
+    if not (base_url and model) or (not local and not api_key):
+        return {"ok": False, "error": "服务地址 / 模型名未配置完整（云端还需 API Key）"}
 
     try:
         from openai import OpenAI
 
-        client = OpenAI(base_url=base_url, api_key=api_key, timeout=15)
+        client = OpenAI(base_url=base_url, api_key=api_key or embedding.PLACEHOLDER_KEY, timeout=60)
         t0 = _time.perf_counter()
         resp = client.embeddings.create(model=model, input=["连通性测试"])
         latency = int((_time.perf_counter() - t0) * 1000)
         dim = len(resp.data[0].embedding)
-        return {"ok": True, "latency_ms": latency, "model": model, "dim": dim}
+        return {"ok": True, "latency_ms": latency, "model": model, "dim": dim,
+                "mode": mode, "base_url": base_url, "local": local}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "model": model, "error": str(e)[:300]}
 

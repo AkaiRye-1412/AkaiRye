@@ -216,7 +216,11 @@ def stats(conn: Connection = Depends(get_db)) -> dict:
         for r in conn.execute("SELECT path FROM manual WHERE status='ready'").fetchall()
         if pdf_scan.in_kb_roots(conn, Path(r["path"]))
     )
-    row = conn.execute("SELECT DISTINCT model_id, dim FROM chunk LIMIT 1").fetchone()
+    # 向量模型口径：取最近一次入索引的块（换模型后立刻反映，而不是随机命中旧行）
+    row = conn.execute(
+        "SELECT model_id, dim FROM chunk WHERE model_id IS NOT NULL"
+        " ORDER BY indexed_at DESC, id DESC LIMIT 1"
+    ).fetchone()
 
     by_status = {"ready": 0, "pending": 0, "failed": 0, "excluded": 0, "unindexed": 0}
     for r in conn.execute(

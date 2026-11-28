@@ -24,16 +24,22 @@ def list_memos(
     keyword: str | None = Query(None),
     conn: Connection = Depends(get_db),
 ) -> list[dict]:
-    """随手笔记列表：仅 note_type='memo' 的记录（绝对路径主键）。"""
+    """随手笔记列表：仅 note_type='memo' 的记录（绝对路径主键）。
+
+    草稿箱（右侧 dock 的速记）虽然物理上可能位于个人笔记目录下，但那是写到一半的纸，
+    不建 note_file 行；这里再挡两道（路径里的 草稿箱/ + 实际草稿目录判定），
+    避免历史残留行混进个人笔记列表。
+    """
     vault.rescan_all(conn)
-    sql = "SELECT * FROM note_file WHERE note_type = 'memo'"
-    params: list = []
+    sql = "SELECT * FROM note_file WHERE note_type = 'memo' AND path NOT LIKE ?"
+    params: list = [f"%/{vault.DRAFT_DIR_NAME}/%"]
     if keyword:
         like = f"%{keyword}%"
         sql += " AND (note_title LIKE ? OR summary LIKE ? OR path LIKE ?)"
         params.extend([like, like, like])
     sql += " ORDER BY updated_date DESC, path"
-    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    return [r for r in rows if not vault.is_draft_path(conn, r["path"])]
 
 
 class CreateMemoBody(BaseModel):

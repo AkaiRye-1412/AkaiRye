@@ -321,6 +321,59 @@ def memo_roots(conn) -> list[Path]:
     return [(vault_root(conn) / "随手笔记").resolve()]
 
 
+# 草稿箱（右侧 dock 的速记）：默认放在第 1 个个人笔记位置下的子目录，与个人笔记同盘
+# 可见、能直接用编辑器打开；可在设置页「草稿箱索引位置」改成任意目录（只取第 1 个）。
+# 无论放哪，rescan / watchdog 都跳过它——速记是"写到一半的纸"，不应混进个人笔记列表，
+# 也不该进知识库索引。
+DRAFT_DIR_NAME = "草稿箱"
+
+
+def draft_roots(conn) -> list[Path]:
+    """草稿箱位置（设置页「草稿箱索引位置」；只取第 1 个，配多个也只认第一个）。
+
+    未配置时回落「个人笔记索引位置」第 1 个目录下的 草稿箱/ 子目录，老配置零迁移。
+    """
+    cfg = config_service.get_raw(conn, "paths")
+    roots = [_as_path(r) for r in _cfg_roots(cfg.get("draft_roots"))]
+    if roots:
+        return roots
+    return [(memo_roots(conn)[0] / DRAFT_DIR_NAME).resolve()]
+
+
+def draft_dir(conn) -> Path:
+    """草稿箱目录（速记实际读写位置；目录按需创建由调用方负责）。"""
+    return draft_roots(conn)[0]
+
+
+def draft_excluded_dirs(conn) -> list[Path]:
+    """扫描时要跳过的全部目录：当前草稿箱 + 每个个人笔记位置下的 草稿箱/。
+
+    后者是默认口径。即使把草稿箱改到别处，旧默认目录里的速记也不能被当成个人笔记
+    扫进列表/索引（否则一改位置，旧速记就"变成"了正式笔记）。
+    """
+    out: list[Path] = []
+    for d in [draft_dir(conn), *[(r / DRAFT_DIR_NAME).resolve() for r in memo_roots(conn)]]:
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def is_draft_path(conn, rel_or_abs: str | Path) -> bool:
+    """路径是否落在草稿箱内（rescan / watchdog 用它跳过速记文件）。
+
+    入参兼容两种主键口径：绝对 posix 路径，或相对售后主目录的相对路径。
+    """
+    p = Path(rel_or_abs)
+    abs_p = p.resolve() if p.is_absolute() else (notes_dir(conn) / p).resolve()
+    for d in draft_excluded_dirs(conn):
+        try:
+            if abs_p.is_relative_to(d):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def db_roots(conn) -> list[Path]:
     """知识库资料目录（「数据库索引位置」，最多 3 个）。
 
@@ -535,6 +588,18 @@ def rescan_all(conn) -> int:
 
     jobs: list[tuple[Path, str, str]] = []  # (abs_path, rel_key, source)
     covered: list[Path] = []
+    # 草稿箱（当前配置的 + 默认位置的）：无论配到哪个根目录下都不建 note_file 行
+    draft_dirs = draft_excluded_dirs(conn)
+
+    def _is_draft(abs_path: Path) -> bool:
+        rp = abs_path.resolve()
+        for d in draft_dirs:
+            try:
+                if rp.is_relative_to(d):
+                    return True
+            except OSError:
+                continue
+        return False
 
     # 售后多根：主根用相对主键（列表按相对路径展示），其余根用绝对主键
     for root in after_sales_roots(conn):
@@ -542,7 +607,7 @@ def rescan_all(conn) -> int:
             continue
         covered.append(root)
         for abs_path in sorted(root.rglob("*.md")):
-            if abs_path.is_file():
+            if abs_path.is_file() and not _is_draft(abs_path):
                 key = (
                     abs_path.relative_to(root).as_posix()
                     if root == primary
@@ -550,13 +615,13 @@ def rescan_all(conn) -> int:
                 )
                 jobs.append((abs_path, key, "after_sales"))
 
-    # 随手多根：绝对主键
+    # 随手多根：绝对主键（草稿箱跳过：速记只是草稿，不建 note_file 行、不进列表/索引）
     for root in memo_roots(conn):
         if not root.is_dir():
             continue
         covered.append(root)
         for abs_path in sorted(root.rglob("*.md")):
-            if abs_path.is_file():
+            if abs_path.is_file() and not _is_draft(abs_path):
                 jobs.append((abs_path, abs_path.as_posix(), "memo"))
 
     # 知识库资料目录（「数据库索引位置」）：绝对主键，note_type='kb'（进索引不进售后/随手列表）
@@ -565,7 +630,7 @@ def rescan_all(conn) -> int:
             continue
         covered.append(root)
         for abs_path in sorted(root.rglob("*.md")):
-            if abs_path.is_file():
+            if abs_path.is_file() and not _is_draft(abs_path):
                 jobs.append((abs_path, abs_path.as_posix(), "kb"))
 
     # 其他白名单目录（知识库附加目录）：绝对主键，按 frontmatter 判定是否 memo
@@ -574,7 +639,7 @@ def rescan_all(conn) -> int:
             continue
         covered.append(ext_dir)
         for abs_path in sorted(ext_dir.rglob("*.md")):
-            if abs_path.is_file():
+            if abs_path.is_file() and not _is_draft(abs_path):
                 jobs.append((abs_path, abs_path.as_posix(), ""))
 
     for abs_path, rel, source in jobs:
@@ -1003,6 +1068,9 @@ class VaultService:
             self._timers.pop(rel, None)
         conn = conn_factory()
         try:
+            if is_draft_path(conn, rel):
+                # 草稿箱速记不参与 note_file 同步与索引（自动保存会频繁触发，必须挡在入口）
+                return
             abs_path = resolve_note_abs(conn, rel)
             if abs_path.is_file():
                 data = abs_path.read_bytes()

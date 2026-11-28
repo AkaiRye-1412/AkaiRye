@@ -376,6 +376,10 @@ kbd {
   color: var(--ink-2);
   transition: background 0.14s, color 0.14s;
 }
+/* 窄轨上并排两个入口（知识助手 / 草稿箱）：同一槽位互斥展开，见 App.vue openDock */
+.dock-rail { display: flex; flex-direction: column; width: 100%; min-height: 0; }
+.dock-rail .rag-rail { flex: 0 0 auto; padding: 14px 0; }
+.dock-rail .rag-rail + .rag-rail { border-top: 1px solid rgba(231, 229, 221, 0.75); }
 .rag-rail:hover { background: #f6f6f1; color: var(--blue-ink); }
 .rag-rail .rail-label {
   writing-mode: vertical-rl;

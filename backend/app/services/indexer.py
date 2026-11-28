@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.services import config_service, textutil, vault
+from app.services import config_service, embedding, textutil, vault
 from app.ws.events import broker
 
 logger = logging.getLogger(__name__)
@@ -139,39 +139,42 @@ def _embed_texts(conn, texts: list[str], on_batch=None) -> list[list[float]] | N
     """调用 embedding 接口；未配置返回 None（FTS-only 降级），失败抛异常。
 
     `on_batch(done, total)` 可选，供手册入库按批推进进度（笔记侧不传，行为不变）。
+    提供方差异（Ollama 的 /v1 前缀、免密钥、免节流）由 services.embedding 统一处理。
     """
     cfg = _embedding_cfg(conn)
-    # 兼容两种保存键名：base_url（代码约定）/ provider（设置页实际写入，2026-11-26 修复）
-    base_url = cfg.get("base_url") or cfg.get("provider")
+    base_url = embedding.base_url(cfg)
     if not base_url or not cfg.get("model"):
         return None
     from openai import OpenAI
 
-    client = OpenAI(base_url=base_url, api_key=cfg.get("api_key") or "sk-empty")
-    # 分批调用：火山 Embeddings API 单次 input 上限 10 条（2026-11-26 实测）；
-    # 突发频率限制严格（429），批次间节流 + 指数退避重试
+    local = embedding.is_local(base_url)
+    client = OpenAI(base_url=base_url, api_key=embedding.api_key(cfg), timeout=120)
+    # 分批调用：云端（火山）单次 input 上限 10 条；本机 Ollama 可以放大，免得 1400 块跑成上百批
+    batch = 32 if local else 10
     out: list[list[float]] = []
-    batch = 10
     for i in range(0, len(texts), batch):
         part = texts[i : i + batch]
         resp = None
-        for attempt in range(5):
+        # 本机没有 429 限频，失败即真失败，不重试；云端保留指数退避
+        attempts = 1 if local else 5
+        for attempt in range(attempts):
             try:
                 resp = client.embeddings.create(model=cfg["model"], input=part)
                 break
             except Exception as e:  # noqa: BLE001
-                if attempt == 4:
+                if attempt == attempts - 1:
                     raise
                 wait = 3.0 * (attempt + 1)
                 logger.warning(
-                    "embedding 批次限频/失败，%.0fs 后重试（%s/4）：%s", wait, attempt + 1, str(e)[:120]
+                    "embedding 批次限频/失败，%.0fs 后重试（%s/%s）：%s",
+                    wait, attempt + 1, attempts - 1, str(e)[:120],
                 )
                 time.sleep(wait)
         out.extend(d.embedding for d in resp.data)
         if on_batch is not None:
             on_batch(min(i + batch, len(texts)), len(texts))
-        if i + batch < len(texts):
-            time.sleep(3.0)  # 批次间节流，规避 429 限频
+        if not local and i + batch < len(texts):
+            time.sleep(3.0)  # 云端批次间节流，规避 429 限频
     return out
 
 

@@ -31,11 +31,17 @@ export const configApi = {
       '/api/config/test-llm',
       body,
     ),
-  testEmbedding: (body: { base_url: string; api_key: string; model: string }) =>
-    http.post<{ ok: boolean; latency_ms?: number; model?: string; dim?: number; error?: string }>(
-      '/api/config/test-embedding',
-      body,
-    ),
+  testEmbedding: (body: { base_url: string; api_key: string; model: string; mode?: string }) =>
+    http.post<{
+      ok: boolean
+      latency_ms?: number
+      model?: string
+      dim?: number
+      mode?: string
+      base_url?: string
+      local?: boolean
+      error?: string
+    }>('/api/config/test-embedding', body),
   /** 程序数据库文件（workbench.db）存放目录；与「数据库索引位置」无关，切换后需重启 */
   dbLocation: () =>
     http.get<{
@@ -130,13 +136,35 @@ export const projectsApi = {
     http.patch<Record<string, any>>(`/api/projects/${encodeURIComponent(path)}`, { status }),
 }
 
-/** ---------------- 随手笔记（「1」顶栏入口，M2 扩展） ---------------- */
+/** ---------------- 个人笔记（「1」顶栏入口，M2 扩展） ---------------- */
 
 export const memosApi = {
   list: (keyword = '') =>
     http.get<Record<string, any>[]>(`/api/memos${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ''}`),
   create: (body: { title: string; body: string; folder: string }) =>
     http.post<Record<string, any>>('/api/memos', body),
+}
+
+/** ---------------- 草稿箱（右侧 dock 速记，自动保存） ---------------- */
+
+export interface DraftItem {
+  path: string
+  /** 第一行非空内容（剥掉 Markdown 记号），空草稿回退文件名 */
+  title: string
+  /** 标题行后的第二行，用于历史列表的第二行说明 */
+  preview: string
+  updated_at: string
+  size: number
+  content?: string
+}
+
+export const draftsApi = {
+  list: () => http.get<DraftItem[]>('/api/drafts'),
+  read: (path: string) => http.get<DraftItem>(`/api/drafts/content?path=${encodeURIComponent(path)}`),
+  create: (content = '') => http.post<DraftItem>('/api/drafts', { content }),
+  save: (path: string, content: string) => http.put<DraftItem>('/api/drafts', { path, content }),
+  remove: (path: string) =>
+    http.delete<{ deleted: boolean; path: string }>(`/api/drafts?path=${encodeURIComponent(path)}`),
 }
 
 export interface RagCitation {
@@ -526,6 +554,25 @@ export interface KbNote {
   indexed_status: 'ready' | 'pending' | 'failed' | 'excluded' | null
   last_error: string | null
   chunks: number
+}
+
+/** 本机 Ollama 探测（设置页「本地自托管」用）：列出已下载模型与向量维度 */
+export interface OllamaModel {
+  name: string
+  size: number
+  family: string
+  parameters: string
+  quantization: string
+  /** 是否可用于向量化（GGUF 缺 pooling 元数据的第三方模型会被 Ollama 拒绝） */
+  embedding: boolean
+  dim: number
+}
+
+export const ollamaApi = {
+  models: (base_url = '') =>
+    http.get<{ running: boolean; base_url: string; error: string; models: OllamaModel[] }>(
+      `/api/ollama/models${base_url ? `?base_url=${encodeURIComponent(base_url)}` : ''}`,
+    ),
 }
 
 export const kbApi = {

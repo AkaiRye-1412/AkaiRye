@@ -8,9 +8,11 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { eventsSocket } from '@/api/ws'
 import { useConfigStore } from '@/stores/config'
+import { useDraftsStore } from '@/stores/drafts'
 import { useRagStore } from '@/stores/rag'
 import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
+import DraftsPanel from '@/components/DraftsPanel.vue'
 import MemoCreateModal from '@/components/MemoCreateModal.vue'
 import RagPanel from '@/rag/RagPanel.vue'
 import { USER_NAME } from '@/utils/profile'
@@ -19,12 +21,13 @@ const route = useRoute()
 const router = useRouter()
 const configStore = useConfigStore()
 const rag = useRagStore()
+const drafts = useDraftsStore()
 const ui = useUiStore()
 
 const NAV_MAIN = [
   { to: '/', label: '首页', icon: 'home', name: 'home' },
   { to: '/notes', label: '售后笔记', icon: 'notes', name: 'notes' },
-  { to: '/memos', label: '随手笔记', icon: 'memo', name: 'memos' },
+  { to: '/memos', label: '个人笔记', icon: 'memo', name: 'memos' },
   { to: '/kb', label: '知识库', icon: 'book', name: 'kb' },
   { to: '/terminal', label: '终端', icon: 'terminal', name: 'terminal' },
   { to: '/repos', label: '项目开发', icon: 'git', name: 'repos' },
@@ -38,7 +41,7 @@ const NAV_UTIL = [
 const PAGE_NAMES: Record<string, string> = {
   home: '首页台面',
   notes: '售后笔记',
-  memos: '随手笔记',
+  memos: '个人笔记',
   kb: '知识库',
   pdf: 'PDF 手册',
   terminal: '终端',
@@ -56,17 +59,68 @@ const configOk = computed(() => !!configStore.status?.config_complete)
 // 滚动条冲突）。终端铺满后 .term-page 精确填满可视高度，fit 才能算准。
 const isHome = computed(() => route.name === 'home' || route.name === 'terminal')
 
-// 顶栏「新建笔记」（「1」入口）＝ 新建随手笔记：打开全局弹窗，写到任意磁盘位置。
+// 顶栏「新建笔记」（「1」入口）＝ 新建个人笔记：打开全局弹窗，写到任意磁盘位置。
 const showMemoCreate = ref(false)
 function newNote() {
   showMemoCreate.value = true
 }
+
+/**
+ * 右侧 dock 只有一个槽位：知识助手与草稿箱互斥，开一个必须收另一个。
+ * （互斥同时用 watch 兜底：全局提问 / 快捷键等任何来源打开知识助手，草稿箱都会让位。）
+ */
+function openDock(which: 'rag' | 'drafts') {
+  if (which === 'rag') {
+    drafts.panelOpen = false
+    rag.panelOpen = true
+  } else {
+    rag.panelOpen = false
+    drafts.panelOpen = true
+  }
+}
+watch(
+  () => rag.panelOpen,
+  (open) => {
+    if (open) drafts.panelOpen = false
+  },
+)
+watch(
+  () => drafts.panelOpen,
+  (open) => {
+    if (open) rag.panelOpen = false
+  },
+)
+
+/**
+ * 设置页改了「草稿箱索引位置」：先把当前这张纸存回旧目录，再换成空白纸。
+ * 否则面板还指着旧目录，之后每次写盘都会被后端按"路径越出草稿箱目录"拒掉。
+ * （首次读到配置只记基线，不搬动纸面——那时面板正在决定显示哪张纸。）
+ */
+const draftRoot = computed(() => configStore.config?.paths?.draft_roots?.[0] ?? '')
+let knownDraftRoot: string | null = null
+watch(
+  [() => configStore.loaded, draftRoot] as const,
+  ([loaded, now]) => {
+    if (!loaded) return
+    if (knownDraftRoot === null) {
+      knownDraftRoot = now
+      return
+    }
+    if (knownDraftRoot !== now) {
+      knownDraftRoot = now
+      void drafts.relocate()
+    }
+  },
+  { immediate: true },
+)
 
 onMounted(() => {
   eventsSocket.connect()
   // 重连后 REST 全量对账（api-rules 第 4 节：推送不作唯一数据来源）
   eventsSocket.onReconnected(() => configStore.load())
   configStore.load()
+  // 刷新前停在草稿箱：知识助手默认展开的状态要让位（否则两个都算"打开"）
+  if (drafts.panelOpen) rag.panelOpen = false
 })
 
 /**
@@ -179,17 +233,24 @@ watch(
         <main class="main" :class="{ 'main-flush': isHome }">
           <router-view />
         </main>
-        <aside class="rag-dock" :class="{ collapsed: !rag.panelOpen }">
+        <aside class="rag-dock" :class="{ collapsed: !rag.panelOpen && !drafts.panelOpen }">
           <RagPanel v-if="rag.panelOpen" />
-          <button v-else class="rag-rail" title="展开知识助手" @click="rag.panelOpen = true">
-            <Icon name="sparkle" :size="17" />
-            <span class="rail-label">知识助手</span>
-          </button>
+          <DraftsPanel v-else-if="drafts.panelOpen" />
+          <div v-else class="dock-rail">
+            <button class="rag-rail" title="展开知识助手" @click="openDock('rag')">
+              <Icon name="sparkle" :size="17" />
+              <span class="rail-label">知识助手</span>
+            </button>
+            <button class="rag-rail" title="展开草稿箱" @click="openDock('drafts')">
+              <Icon name="memo" :size="17" />
+              <span class="rail-label">草稿箱</span>
+            </button>
+          </div>
         </aside>
       </div>
     </div>
 
-    <!-- 全局「新建随手记」弹窗（顶栏「新建笔记」按钮触发） -->
+    <!-- 全局「新建个人笔记」弹窗（顶栏「新建笔记」按钮触发） -->
     <MemoCreateModal :open="showMemoCreate" @close="showMemoCreate = false" />
 
     <!-- 全局轻提示：ui.toast() 的渲染宿主（此前只写状态、无处渲染，导致提示静默丢失） -->
