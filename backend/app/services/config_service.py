@@ -17,7 +17,21 @@ API_KEY_MASK = "******"
 DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "llm": {"provider": "", "base_url": "", "api_key": "", "model": "", "temperature": 0.7},
     "embedding": {"mode": "cloud", "provider": "", "api_key": "", "model": "", "dim": 1024},
-    "paths": {"vault_root": "", "notes_folder": "客户售后问题", "pdf_root": "", "code_roots": []},
+    # 5 类索引位置（各最多 3 个，第 1 个为主位置；留空则回落旧单值字段）
+    # after_sales_roots 售后笔记 / memo_roots 随手笔记
+    # pdf_roots PDF 手册（仅手册界面浏览/预览，不作为知识库索引来源）
+    # db_roots 知识库资料目录（其中的 Markdown 会被解析切块进索引）/ code_roots 代码仓库
+    # 注意：程序自身的 SQLite 库文件位置不在这里，见 data/instance.json 的 db_file_dir
+    "paths": {
+        "vault_root": "",
+        "notes_folder": "客户售后问题",
+        "pdf_root": "",
+        "code_roots": [],
+        "after_sales_roots": [],
+        "memo_roots": [],
+        "pdf_roots": [],
+        "db_roots": [],
+    },
     "index.whitelist": {"folders": ["客户售后问题"], "excluded": []},
     "dashboard": {"follow_up_days": 7, "default_range": "month"},
     "backup": {"dir": "", "keep": 7},

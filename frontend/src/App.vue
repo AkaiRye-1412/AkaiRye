@@ -4,13 +4,14 @@
  * 左侧个人信息卡 + 导航 + Vault 卡 → 顶栏（页面标题 / 终端 / 新建笔记）
  * → 主区（路由视图）+ 右侧 C1 RAG 常驻面板（Q-02：所有页面常驻）。
  */
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { eventsSocket } from '@/api/ws'
 import { useConfigStore } from '@/stores/config'
 import { useRagStore } from '@/stores/rag'
 import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
+import MemoCreateModal from '@/components/MemoCreateModal.vue'
 import RagPanel from '@/rag/RagPanel.vue'
 import { USER_NAME } from '@/utils/profile'
 
@@ -23,9 +24,10 @@ const ui = useUiStore()
 const NAV_MAIN = [
   { to: '/', label: '首页', icon: 'home', name: 'home' },
   { to: '/notes', label: '售后笔记', icon: 'notes', name: 'notes' },
+  { to: '/memos', label: '随手笔记', icon: 'memo', name: 'memos' },
   { to: '/kb', label: '知识库', icon: 'book', name: 'kb' },
   { to: '/terminal', label: '终端', icon: 'terminal', name: 'terminal' },
-  { to: '/repos', label: '代码仓库', icon: 'git', name: 'repos' },
+  { to: '/repos', label: '项目开发', icon: 'git', name: 'repos' },
   { to: '/settings', label: '设置', icon: 'settings', name: 'settings' },
 ]
 const NAV_UTIL = [
@@ -36,19 +38,17 @@ const NAV_UTIL = [
 const PAGE_NAMES: Record<string, string> = {
   home: '首页台面',
   notes: '售后笔记',
+  memos: '随手笔记',
   kb: '知识库',
   pdf: 'PDF 手册',
   terminal: '终端',
-  repos: '代码仓库',
+  repos: '项目开发',
   cleanup: '存量整理',
   settings: '系统设置',
 }
 
 const pageName = computed(() => PAGE_NAMES[String(route.name)] ?? '首页台面')
-const vaultPath = computed(() => configStore.config?.paths?.vault_root || '未配置 vault 路径')
-const vaultOk = computed(() => !!configStore.status?.vault_root_valid)
 const configOk = computed(() => !!configStore.status?.config_complete)
-const indexedCount = computed(() => configStore.status?.counts?.notes ?? 0)
 
 // 首页/终端铺满到窗口底（与知识助手面板底边齐平），主区不保留底部内边距。
 // 终端页必须铺满：.main 默认的 padding+overflow:auto 会压缩终端可视高度并叠加外层
@@ -56,8 +56,10 @@ const indexedCount = computed(() => configStore.status?.counts?.notes ?? 0)
 // 滚动条冲突）。终端铺满后 .term-page 精确填满可视高度，fit 才能算准。
 const isHome = computed(() => route.name === 'home' || route.name === 'terminal')
 
+// 顶栏「新建笔记」（「1」入口）＝ 新建随手笔记：打开全局弹窗，写到任意磁盘位置。
+const showMemoCreate = ref(false)
 function newNote() {
-  router.push({ path: '/notes', query: { new: '1' } })
+  showMemoCreate.value = true
 }
 
 onMounted(() => {
@@ -135,18 +137,6 @@ watch(
       </nav>
 
       <div class="sidebar-foot">
-        <div class="vault-card">
-          <div class="vault-card-top">
-            <Icon name="database" :size="14" />
-            <span>Obsidian Vault</span>
-            <em :class="{ warn: !vaultOk }">{{ vaultOk ? '监听中' : '未连接' }}</em>
-          </div>
-          <div class="vault-path" :title="vaultPath">{{ vaultPath }}</div>
-          <div class="vault-meta">
-            <span class="dot" :class="vaultOk ? 'ok' : 'warn'" />
-            已索引 {{ indexedCount }} 篇
-          </div>
-        </div>
         <div class="side-links">
           <button
             class="side-link"
@@ -198,6 +188,9 @@ watch(
         </aside>
       </div>
     </div>
+
+    <!-- 全局「新建随手记」弹窗（顶栏「新建笔记」按钮触发） -->
+    <MemoCreateModal :open="showMemoCreate" @close="showMemoCreate = false" />
 
     <!-- 全局轻提示：ui.toast() 的渲染宿主（此前只写状态、无处渲染，导致提示静默丢失） -->
     <div v-if="ui.toasts.length" class="toast-host" aria-live="polite">

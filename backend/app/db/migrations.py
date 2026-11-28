@@ -103,6 +103,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("迁移 v6 完成（git_repo 增加 remote_url / commit_count）")
 
+    if 7 not in applied:
+        _migrate_v7_note_file_note_type(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'note_file_note_type', ?)",
+            (_utcnow(),),
+        )
+        conn.commit()
+        logger.info("迁移 v7 完成（note_file 增加 note_type：after_sales / memo）")
+
 
 # v3：M7 存量整理（03 文档 6 章三期表预留的落位）。
 # - cleanup_item.before_content 保存执行前的完整原文，回滚按字节还原（只写头部 ≠ 只回滚头部：
@@ -216,6 +225,22 @@ def _migrate_v2_note_file_columns(conn: sqlite3.Connection) -> None:
         if name not in existing:
             conn.execute(f"ALTER TABLE note_file ADD COLUMN {name} {decl}")
     # 旧行为 NULL：下次 GET /api/notes（或启动重扫）时由 scan_file 填充
+
+
+def _migrate_v7_note_file_note_type(conn: sqlite3.Connection) -> None:
+    """v7：note_file 增加 note_type 区分笔记类型（ALTER 不加 CHECK，值域由写入侧校验）。
+
+    - after_sales：售后笔记（默认，含历史存量，NULL 视为 after_sales）；
+    - memo：随手笔记（「1」顶栏入口，任意磁盘位置、简单格式）；
+    - kb：知识库资料目录（「数据库索引位置」里要解析的文档，进索引不进两个列表）。
+    """
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(note_file)").fetchall()}
+    if "note_type" not in existing:
+        conn.execute("ALTER TABLE note_file ADD COLUMN note_type TEXT")
+    # 存量 NULL → after_sales
+    conn.execute(
+        "UPDATE note_file SET note_type = 'after_sales' WHERE note_type IS NULL"
+    )
 
 
 def _vec_table_exists(conn: sqlite3.Connection) -> bool:

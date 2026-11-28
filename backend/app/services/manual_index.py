@@ -69,10 +69,16 @@ def _publish(force: bool = False) -> None:
     broker.publish("ingest.progress", task_state())
 
 
-def _set_state(**kw) -> None:
+def _set_state(force: bool = False, **kw) -> None:
+    """更新任务状态并推送。
+
+    force=True 用于阶段跃迁 / 任务开始结束（必须实时）；
+    纯进度更新（向量化批次回调）走 0.5s 节流——否则每个 batch 都推一次 WS，
+    前端会被高频事件牵着反复刷新列表，看起来就是页面在闪。
+    """
     with _state_lock:
         _state.update(kw)
-    _publish(force=True)
+    _publish(force=force)
 
 
 def _set_manual(conn, manual_id: int, **fields) -> None:
@@ -150,19 +156,19 @@ def index_manual(conn, manual_id: int) -> dict:
     is_rebuild = row["status"] in ("ready", "update", "rebuilding")
     _set_manual(conn, manual_id, status="rebuilding" if is_rebuild else "parsing",
                 progress=5, error=None)
-    _set_state(running=True, manual_id=manual_id, name=row["name"], stage="parsing",
+    _set_state(force=True, running=True, manual_id=manual_id, name=row["name"], stage="parsing",
                progress=5, started_at=_now(), finished_at=None, error="")
 
     parsed = pdf_parse.parse_pdf(path)
     _set_manual(conn, manual_id, progress=20)
-    _set_state(stage="chunking", progress=20)
+    _set_state(force=True, stage="chunking", progress=20)
 
     pieces = parsed.chunks
     if not pieces:
         raise ValueError("解析完成但没有可入库的文本块，请确认 PDF 内容是否为空")
 
     _set_manual(conn, manual_id, progress=25)
-    _set_state(stage="embedding", progress=25)
+    _set_state(force=True, stage="embedding", progress=25)
 
     cfg = indexer._embedding_cfg(conn)
     model_id = indexer._model_id(cfg)
@@ -192,7 +198,7 @@ def index_manual(conn, manual_id: int) -> dict:
         dim = len(vectors[0]) if vectors else 0
         indexer._ensure_vec_dim(conn, dim)
 
-    _set_state(stage="writing", progress=95)
+    _set_state(force=True, stage="writing", progress=95)
     now = _now()
     # 大文件哈希放到事务外：写库事务期间不做磁盘 I/O，避免长事务锁库
     st = path.stat()
@@ -333,11 +339,11 @@ def _worker(conn_factory) -> None:
                     broker.publish("manual.updated", {
                         "manual_id": mid, "status": "failed", "error": msg,
                     })
-                    _set_state(error=msg)
+                    _set_state(force=True, error=msg)
         finally:
             conn.close()
     finally:
-        _set_state(running=False, stage="", finished_at=_now())
+        _set_state(force=True, running=False, stage="", finished_at=_now())
         broker.publish("ingest.progress", task_state())
         with _task_lock:
             _running = False
@@ -350,7 +356,7 @@ def start(conn_factory) -> dict:
         if _running:
             return {"started": False, "reason": "已有入库任务进行中", "state": task_state()}
         _running = True
-    _set_state(running=True, stage="queued", progress=0, error="")
+    _set_state(force=True, running=True, stage="queued", progress=0, error="")
     threading.Thread(target=_worker, args=(conn_factory,), daemon=True, name="manual-ingest").start()
     return {"started": True, "state": task_state()}
 
@@ -367,17 +373,17 @@ def recover_on_startup(conn) -> int:
 
 
 def relocate(conn, manual_id: int, new_path: str) -> dict:
-    """重新定位失效手册（FR-RAG-09）：路径必须在 pdf_root 内，哈希可校验时要求一致。"""
+    """重新定位失效手册（FR-RAG-09）：路径必须在任一扫描目录内，哈希可校验时要求一致。"""
     from app.services import pdf_scan
 
-    root = pdf_scan.pdf_root(conn).resolve()
+    roots = pdf_scan.scan_roots(conn)
+    if not roots:
+        pdf_scan.pdf_root(conn)  # 统一抛「未配置」错误
     p = Path(new_path).expanduser()
     if not p.is_absolute():
-        p = root / new_path
-    try:
-        p.resolve().relative_to(root)
-    except ValueError as e:
-        raise ValueError("新路径必须位于 PDF 根目录内") from e
+        p = roots[0] / new_path
+    if not pdf_scan.in_scan_roots(conn, p):
+        raise ValueError("新路径必须位于「PDF 手册索引位置」或「数据库索引位置」内")
     if not p.is_file():
         raise FileNotFoundError("新路径下没有找到 PDF 文件")
 

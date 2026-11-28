@@ -100,6 +100,26 @@ const grouped = computed(() => {
     .sort((a, b) => a.customer.localeCompare(b.customer, 'zh-Hans-CN'))
 })
 
+/* 客户分组折叠：点分组带收/展该客户下的笔记。
+   只记「收起的客户名」——新客户默认展开；搜索或切换筛选时自动全部展开，
+   避免搜出来的结果被一个此前收起的组头挡住。 */
+const collapsedGroups = ref<Set<string>>(new Set())
+
+function isGroupCollapsed(name: string): boolean {
+  return collapsedGroups.value.has(name)
+}
+
+function toggleGroup(name: string) {
+  const next = new Set(collapsedGroups.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  collapsedGroups.value = next
+}
+
+watch([keyword, filter], () => {
+  if (collapsedGroups.value.size) collapsedGroups.value = new Set()
+})
+
 const statusCount = computed(() => ({
   all: notes.value.length,
   active: notes.value.filter((n) => n.status === 'active').length,
@@ -536,6 +556,10 @@ const newProject = ref('')
 const newStart = ref(todayStr())
 const creating = ref(false)
 
+function openCreate() {
+  showCreate.value = true
+}
+
 const newPathPreview = computed(() => {
   const c = newCustomer.value.trim()
   const p = newProject.value.trim()
@@ -618,7 +642,7 @@ async function syncFromRoute() {
     detail.value = null
   }
   if (q.new === '1') {
-    showCreate.value = true
+    openCreate()
     router.replace({ path: '/notes', query: q.path ? { path: q.path as string } : {} })
   }
 }
@@ -628,7 +652,7 @@ watch(
   () => route.query.new,
   (v) => {
     if (v === '1') {
-      showCreate.value = true
+      openCreate()
       router.replace({ path: '/notes', query: route.query.path ? { path: route.query.path as string } : {} })
     }
   },
@@ -738,7 +762,7 @@ onUnmounted(() => {
           <button class="btn ghost sm cleanup-btn" @click="router.push('/cleanup')">
             <Icon name="scissors" :size="14" /><span>存量整理</span>
           </button>
-          <button class="btn primary sm" @click="showCreate = true">
+          <button class="btn primary sm" @click="openCreate()">
             <Icon name="plus" :size="14" /><span>新建笔记</span>
           </button>
         </div>
@@ -765,42 +789,55 @@ onUnmounted(() => {
         </div>
         <template v-else>
           <template v-for="g in grouped" :key="g.customer">
-            <div class="notes-group-label">
+            <div
+              class="notes-group-label"
+              :class="{ collapsed: isGroupCollapsed(g.customer) }"
+              role="button"
+              tabindex="0"
+              :aria-expanded="!isGroupCollapsed(g.customer)"
+              :title="isGroupCollapsed(g.customer) ? `展开「${g.customer}」` : `收起「${g.customer}」`"
+              @click="toggleGroup(g.customer)"
+              @keydown.enter.prevent="toggleGroup(g.customer)"
+              @keydown.space.prevent="toggleGroup(g.customer)"
+            >
+              <Icon :name="isGroupCollapsed(g.customer) ? 'chevronRight' : 'chevronDown'" :size="12" class="ngl-caret" />
               <Icon name="folder" :size="13" /> {{ g.customer }}
               <span>{{ g.items.length }}</span>
             </div>
-            <div
-              v-for="n in g.items"
-              :key="n.path"
-              class="note-row"
-              :class="{ active: n.path === selectedPath }"
-              @click="openNote(n.path)"
-            >
-              <div class="nr-main">
-                <span class="nr-title">
-                  {{ rowTitle(n) }}
-                  <span v-if="n.head_ok === 0" class="badge warn" title="缺少 name 头部字段（存量整理可补齐）">缺头</span>
-                </span>
-                <span class="nr-summary">{{ n.summary || '—' }}</span>
+            <template v-if="!isGroupCollapsed(g.customer)">
+              <div
+                v-for="n in g.items"
+                :key="n.path"
+                class="note-row"
+                :class="{ active: n.path === selectedPath }"
+                @click="openNote(n.path)"
+              >
+                <div class="nr-main">
+                  <span class="nr-title">
+                    {{ rowTitle(n) }}
+                    <span v-if="n.head_ok === 0" class="badge warn" title="缺少 name 头部字段（存量整理可补齐）">缺头</span>
+                  </span>
+                  <span class="nr-summary">{{ n.summary || '—' }}</span>
+                </div>
+                <div class="nr-status">
+                  <span class="badge" :class="rowBadge(n).cls">{{ rowBadge(n).text }}</span>
+                </div>
+                <div class="nr-date nr-start">{{ n.start_date || '—' }}</div>
+                <div class="nr-date nr-upd">
+                  <strong>{{ n.updated_date || '—' }}</strong>
+                  <em>{{ relDays(n.updated_date) }}</em>
+                </div>
+                <div class="nr-tags">
+                  <span v-for="t in rowTags(n).slice(0, 2)" :key="t" class="tag">{{ t }}</span>
+                </div>
+                <div class="nr-act" @click.stop>
+                  <Icon class="nr-go-ic" name="chevronRight" :size="15" />
+                  <button class="nr-del" title="删除笔记（移入 vault 的 .trash，可还原）" @click.stop="askDelete(n)">
+                    <Icon name="trash" :size="14" />
+                  </button>
+                </div>
               </div>
-              <div class="nr-status">
-                <span class="badge" :class="rowBadge(n).cls">{{ rowBadge(n).text }}</span>
-              </div>
-              <div class="nr-date nr-start">{{ n.start_date || '—' }}</div>
-              <div class="nr-date nr-upd">
-                <strong>{{ n.updated_date || '—' }}</strong>
-                <em>{{ relDays(n.updated_date) }}</em>
-              </div>
-              <div class="nr-tags">
-                <span v-for="t in rowTags(n).slice(0, 2)" :key="t" class="tag">{{ t }}</span>
-              </div>
-              <div class="nr-act" @click.stop>
-                <Icon class="nr-go-ic" name="chevronRight" :size="15" />
-                <button class="nr-del" title="删除笔记（移入 vault 的 .trash，可还原）" @click.stop="askDelete(n)">
-                  <Icon name="trash" :size="14" />
-                </button>
-              </div>
-            </div>
+            </template>
           </template>
         </template>
       </div>
@@ -1164,7 +1201,18 @@ onUnmounted(() => {
   color: var(--blue-ink);
   background: #f4f8fe;
   border-top: 1px solid #e4edfb;
+  /* 整条组头即折叠开关 */
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s;
 }
+.notes-group-label:hover { background: #eaf2fe; }
+.notes-group-label:active { background: #e2edfd; }
+.notes-group-label:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+/* 收起时组头压暗一档 + 保留一个底部细线，视觉上像「合上的抽屉」 */
+.notes-group-label.collapsed { background: #f0f5fd; border-bottom: 1px solid #e4edfb; }
+.notes-group-label.collapsed > span { opacity: 0.75; }
+.notes-group-label .ngl-caret { color: var(--blue); opacity: 0.65; }
 .notes-group-label svg { color: var(--blue); opacity: 0.7; }
 .notes-group-label > span {
   display: inline-flex;

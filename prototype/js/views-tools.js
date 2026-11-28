@@ -190,14 +190,7 @@
         const tabId = b.dataset.close;
         const x = S.terminal.find((z) => z.id === tabId);
         if (!x) return;
-        if (x.running) {
-          const ok = await U.confirm({
-            title: '关闭仍在运行的终端？',
-            message: `标签「${x.title}」中仍有进程在运行。关闭后该后台进程（PTY 会话）将终止。`,
-            confirmText: '关闭并终止', danger: true
-          });
-          if (!ok) return;
-        }
+        // 直接关闭，不再二次确认
         S.terminal = S.terminal.filter((z) => z.id !== tabId);
         if (activeId === tabId) activeId = S.terminal[0]?.id || null;
         if (!S.terminal.length) {

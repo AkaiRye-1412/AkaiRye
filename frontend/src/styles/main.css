@@ -251,31 +251,8 @@ a { color: inherit; text-decoration: none; }
    因为侧栏只有 0.26 白，压在壁纸上再浅就读不出来了 */
 .nav-util { color: #6e6b63; }
 
-/* 侧栏底部 Vault 卡 */
+/* 侧栏底部 */
 .sidebar-foot { padding-top: 10px; }
-.vault-card { background: rgba(242, 241, 235, 0.42); border: 1px solid rgba(231, 229, 221, 0.8); border-radius: 11px; padding: 10px 11px; }
-.vault-card-top { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
-.vault-card-top em {
-  margin-left: auto;
-  font-style: normal;
-  font-size: 9.5px;
-  color: var(--green-ink);
-  background: var(--green-soft);
-  border: 1px solid var(--green-line);
-  border-radius: 5px;
-  padding: 1px 4px;
-}
-.vault-card-top em.warn { color: var(--amber-ink); background: var(--amber-soft); border-color: var(--amber-line); }
-.vault-path {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--muted);
-  margin: 6px 0 5px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.vault-meta { font-size: 10.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
 .side-links { display: flex; gap: 4px; margin-top: 8px; }
 .side-link {
   flex: 1;

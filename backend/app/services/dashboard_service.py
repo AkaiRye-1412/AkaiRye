@@ -89,8 +89,14 @@ def _compute_summary(rows: list[dict], follow_up_days: int) -> dict:
             scanned_at = r["scanned_at"]  # 本次扫描时间（页脚"扫描于"展示用）
         status = r["status"]
         customer = r["customer"] or "（未知客户）"
-        stat = customer_stat.setdefault(customer, {"customer": customer, "total": 0, "open": 0})
+        stat = customer_stat.setdefault(
+            customer,
+            {"customer": customer, "total": 0, "open": 0, "last_updated": ""},
+        )
         stat["total"] += 1
+        # 同数量的客户按「最近更新」排队，新建的客户不会因为名称顺序沉到列表末尾
+        if (r["updated_date"] or "") > stat["last_updated"]:
+            stat["last_updated"] = r["updated_date"] or ""
         if status == "active":
             active += 1
             stat["open"] += 1
@@ -124,7 +130,13 @@ def _compute_summary(rows: list[dict], follow_up_days: int) -> dict:
                 )
 
     follow_ups.sort(key=lambda x: (x["updated_date"] or ""))  # 04 文档：按 updated_date 升序
-    customer_top = sorted(customer_stat.values(), key=lambda s: (-s["total"], s["customer"]))[:CUSTOMER_TOP_N]
+    # FR-DASH-03：customer_top 保持 Top N（对外兼容），customer_all 给「客户分布」全量展示——
+    # 只看 Top 5 时，新加的小客户（通常只有 1 条）会被同数量的老客户按名称顺序挤掉，
+    # 表现为「新建了客户但分布里不出现」。
+    customer_all = sorted(customer_stat.values(), key=lambda s: s["customer"])
+    customer_all.sort(key=lambda s: s["last_updated"], reverse=True)
+    customer_all.sort(key=lambda s: -s["total"])  # 主页记录数降序；同数量按最近更新、再按名称
+    customer_top = customer_all[:CUSTOMER_TOP_N]
     return {
         "active_count": active,
         "archived_count": archived,
@@ -133,6 +145,8 @@ def _compute_summary(rows: list[dict], follow_up_days: int) -> dict:
         "month_new_count": month_new,
         "avg_handle_days": round(sum(handle_days) / len(handle_days)) if handle_days else None,
         "customer_top": customer_top,
+        "customer_all": customer_all,
+        "customer_count": len(customer_all),
         "follow_up_days": follow_up_days,
         "scanned_at": scanned_at or None,
         "follow_ups_detail": follow_ups,  # 内部复用；API 层单独输出

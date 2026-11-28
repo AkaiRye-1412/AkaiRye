@@ -142,8 +142,9 @@ def test_first_question_auto_names_session(client, monkeypatch):
 
     # 兼容旧会话：标题仍是默认值但已有历史 → 用会话里的第一条问题命名
     s3 = c.post("/api/rag/sessions", json={}).json()
-    c.post("/api/rag/ask", json={"session_id": s3["id"], "question": "第一条问题",
-                                 "scope": {"mode": "all"}})
+    ask3_first = c.post("/api/rag/ask", json={"session_id": s3["id"], "question": "第一条问题",
+                                              "scope": {"mode": "all"}}).json()
+    _wait_done(c, ask3_first["message_id"])  # 等生成结束，避免下一次提问撞 409 state_conflict
     c.patch(f"/api/rag/sessions/{s3['id']}", json={"title": "新会话"})  # 模拟历史遗留数据
     ask4 = c.post("/api/rag/ask", json={"session_id": s3["id"], "question": "第二条不同的问题",
                                         "scope": {"mode": "all"}}).json()

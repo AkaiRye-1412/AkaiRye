@@ -25,31 +25,52 @@ STATUS_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _root(conn: Connection) -> Path:
+def _root(conn: Connection, scope: str = "manual") -> Path:
+    """校验对应页面至少有一个可用目录。
+
+    - 手册页（manual）：必须有「PDF 手册索引位置」；
+    - 知识库页（kb）：必须有「数据库索引位置」。
+    """
     try:
+        if scope == "kb":
+            roots = pdf_scan.kb_roots(conn)
+            if not roots:
+                raise pdf_scan.PdfRootError(
+                    "尚未配置「数据库索引位置」：只有该目录内的 PDF 才能进知识库"
+                )
+            return roots[0]
         return pdf_scan.pdf_root(conn)
     except pdf_scan.PdfRootError as e:
         raise HTTPException(status_code=400, detail={"code": "path_invalid", "message": str(e)}) from e
 
 
 @router.get("/pdf/tree")
-def pdf_tree(conn: Connection = Depends(get_db)) -> dict:
-    """扫描 pdf_root 并返回按文件夹分组的目录树（含未入库文件与状态）。
+def pdf_tree(
+    scope: str = Query("manual", pattern="^(manual|kb)$", description="manual=手册页；kb=知识库（数据库索引位置）"),
+    conn: Connection = Depends(get_db),
+) -> dict:
+    """扫描配置目录并返回按文件夹分组的目录树（含未入库文件与状态）。
 
     每次请求都会做一次增量同步：新增登记为 discovered、mtime 变化标 update、
     消失的标 invalid —— 这样用户在资源管理器里拷进 PDF，刷新页面就能看到。
+
+    两个页面各看各的目录：手册页（默认）只列「PDF 手册索引位置」内的 PDF，
+    知识库页（scope='kb'）只列「数据库索引位置」内的 PDF。
     """
-    _root(conn)
+    _root(conn, scope)
     summary = pdf_scan.scan(conn)
     conn.commit()
-    data = pdf_scan.tree(conn)
+    data = pdf_scan.tree(conn, scope=scope)
     return {**data, "scan": summary}
 
 
 @router.post("/pdf/rescan")
-def pdf_rescan(conn: Connection = Depends(get_db)) -> dict:
+def pdf_rescan(
+    scope: str = Query("manual", pattern="^(manual|kb)$"),
+    conn: Connection = Depends(get_db),
+) -> dict:
     """手动重新扫描：返回差异摘要 {added, updated, invalid, removed}。"""
-    _root(conn)
+    _root(conn, scope)
     summary = pdf_scan.scan(conn)
     conn.commit()
     return summary
@@ -83,12 +104,16 @@ def pdf_search(
         like = f"%{keyword}%"
         params.extend([like, like])
     sql += " ORDER BY m.path"
-    root = _root(conn).resolve()
     out = []
     for row in conn.execute(sql, params).fetchall():
         item = dict(row)
+        own_root = pdf_scan.root_of(conn, Path(item["path"]))
         try:
-            item["rel_path"] = Path(item["path"]).resolve().relative_to(root).as_posix()
+            item["rel_path"] = (
+                Path(item["path"]).resolve().relative_to(own_root).as_posix()
+                if own_root
+                else Path(item["path"]).name
+            )
         except (ValueError, OSError):
             item["rel_path"] = Path(item["path"]).name
         out.append(item)
@@ -99,17 +124,15 @@ def pdf_search(
 def reader_pdf(manual_id: int, conn: Connection = Depends(get_db)):
     """PDF 字节流（Starlette FileResponse 原生支持 Range/断点续读）。
 
-    C2 双模式共用：已入库手册带页码跳转，未入库只做本地预览；路径必须位于 pdf_root 内。
+    C2 双模式共用：已入库手册带页码跳转，未入库只做本地预览；
+    路径必须位于任一「PDF 手册索引位置」或「数据库索引位置」内。
     """
     row = conn.execute("SELECT path, name FROM manual WHERE id = ?", (manual_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "手册不存在"})
-    root = _root(conn).resolve()
     pdf_path = Path(row["path"])
-    try:
-        pdf_path.resolve().relative_to(root)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail={"code": "path_outside_root", "message": "路径越界"}) from e
+    if not pdf_scan.in_scan_roots(conn, pdf_path):
+        raise HTTPException(status_code=400, detail={"code": "path_outside_root", "message": "路径越界"})
     if not pdf_path.is_file():
         raise HTTPException(status_code=410, detail={"code": "file_gone", "message": "PDF 文件不存在（路径失效）"})
     # inline：供阅读器内嵌显示（attachment 会触发下载，C2 就没法预览了）

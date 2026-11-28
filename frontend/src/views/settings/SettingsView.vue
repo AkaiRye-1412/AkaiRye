@@ -5,12 +5,13 @@
  * 交互约定：
  * - 整页一份「未保存修改」状态：任一字段与上次落库快照不一致即算脏，顶部统一保存；
  * - 分节提交：只有脏的节才发 PUT /api/config，互不牵连；api_key 留空 = 不修改；
- * - 路径保存后触发后台补齐索引；白名单走 /api/kb/whitelist（移出要删块，不能只写配置）；
+ * - 路径保存后触发后台补齐索引（索引范围由 5 类位置决定，不再单独维护白名单）；
  * - 测试连接不落库，Embedding 实测维度回填到表单（保存后生效，与索引维度不一致会提示）；
  * - 保存后热生效（config.updated 广播）。
  */
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { configApi, kbApi, reposApi, type Brand, type KbStats } from '@/api'
+import { ApiError } from '@/api/http'
 import { useConfigStore } from '@/stores/config'
 import { useUiStore } from '@/stores/ui'
 import Icon from '@/components/Icon.vue'
@@ -52,8 +53,139 @@ const paths = reactive({
   notes_folder: '',
   pdf_root: '',
   code_roots: [] as string[],
+  // 5 类索引位置（各最多 3 个，第 1 个为主位置）
+  after_sales_roots: [] as string[],
+  memo_roots: [] as string[],
+  pdf_roots: [] as string[],
+  db_roots: [] as string[],
 })
-const whitelist = ref<string[]>([])
+
+/** 索引位置分组（设置页按这 5 组展示，每组最多 3 个位置） */
+type RootGroupKey =
+  | 'after_sales_roots'
+  | 'memo_roots'
+  | 'pdf_roots'
+  | 'db_roots'
+  | 'code_roots'
+
+const ROOT_GROUPS: {
+  key: RootGroupKey
+  label: string
+  icon: string
+  hint: string
+  placeholder: string
+}[] = [
+  {
+    key: 'after_sales_roots',
+    label: '售后笔记索引位置',
+    icon: 'notes',
+    hint: '新建售后笔记默认写第 1 个位置；全部位置参与扫描与索引。',
+    placeholder: 'D:\\Notes\\客户售后问题',
+  },
+  {
+    key: 'memo_roots',
+    label: '随手笔记索引位置',
+    icon: 'memo',
+    hint: '新建随手记默认写第 1 个位置；全部位置参与扫描与索引。',
+    placeholder: 'D:\\Notes\\随手笔记',
+  },
+  {
+    key: 'pdf_roots',
+    label: 'PDF 手册索引位置',
+    icon: 'file',
+    hint: '只供 PDF 手册界面浏览与预览，其中的 PDF 不会进知识库；要入库请把 PDF 放到「数据库索引位置」。',
+    placeholder: 'D:\\Manuals',
+  },
+  {
+    key: 'db_roots',
+    label: '数据库索引位置',
+    icon: 'database',
+    hint: '知识库要解析的资料目录：其中的 Markdown 自动进索引；PDF 也只有在这些目录里才能入库（手册页可浏览全部 PDF）。',
+    placeholder: 'D:\\KnowledgeBase',
+  },
+  {
+    key: 'code_roots',
+    label: '项目开发索引位置',
+    icon: 'git',
+    hint: '自动递归发现各根目录下的 .git 仓库。',
+    placeholder: 'D:\\Code',
+  },
+]
+
+function rootsOf(key: RootGroupKey): string[] {
+  return paths[key]
+}
+
+/**
+ * 调后端弹本机「选择文件夹」框。
+ * - ok：拿到绝对路径
+ * - cancel：用户取消 / 出错，调用方什么都不做
+ * - manual：系统不支持原生对话框，退回手动输入
+ */
+type PickResult = { status: 'ok'; path: string } | { status: 'cancel' } | { status: 'manual' }
+
+const picking = ref(false)
+
+async function pickFolder(): Promise<PickResult> {
+  if (picking.value) return { status: 'cancel' }
+  picking.value = true
+  try {
+    const r = await configApi.pickFolder()
+    if (r.cancelled || !r.path) return { status: 'cancel' }
+    return { status: 'ok', path: r.path }
+  } catch (e) {
+    const err = e as ApiError
+    if (err.code === 'picker_unavailable') {
+      ui.toast('warn', err.message)
+      return { status: 'manual' }
+    }
+    if (err.code === 'picker_busy') {
+      ui.toast('info', '选择窗口已经打开了，请先完成它（若没看到，按 Alt+Tab 切换一下）')
+      return { status: 'cancel' }
+    }
+    ui.toast('error', `打开选择框失败：${err.message}`)
+    return { status: 'cancel' }
+  } finally {
+    picking.value = false
+  }
+}
+
+async function addRoot(key: RootGroupKey) {
+  if (paths[key].length >= 3) {
+    ui.toast('warn', '每类最多 3 个索引位置')
+    return
+  }
+  const r = await pickFolder()
+  if (r.status === 'cancel') return
+  if (r.status === 'manual') {
+    paths[key].push('') // 退回手动输入
+    return
+  }
+  if (paths[key].some((x) => x.toLowerCase() === r.path.toLowerCase())) {
+    ui.toast('info', '该目录已在这个列表里')
+    return
+  }
+  paths[key].push(r.path)
+}
+
+/** 已有槽位重新选目录（点行内文件夹图标） */
+async function repickRoot(key: RootGroupKey, index: number) {
+  const r = await pickFolder()
+  if (r.status === 'cancel') return
+  if (r.status === 'manual') return
+  paths[key][index] = r.path
+}
+
+/** 程序数据库文件位置：同样用系统选择框 */
+async function pickDbFileDir() {
+  const r = await pickFolder()
+  if (r.status !== 'ok') return
+  dbFileDir.value = r.path
+}
+
+function removeRoot(key: RootGroupKey, index: number) {
+  paths[key].splice(index, 1)
+}
 const dashboard = reactive({ follow_up_days: 7, default_range: 'month' })
 
 const showLlmKey = ref(false)
@@ -63,15 +195,20 @@ const showEmbKey = ref(false)
 
 const brands = ref<Brand[]>([])
 const kbStats = ref<KbStats | null>(null)
+const dbLoc = ref<{
+  dir: string
+  active_dir: string
+  db_file: string
+  default_dir: string
+  restart_required: boolean
+} | null>(null)
+/** 程序数据库文件（workbench.db）目录：与「数据库索引位置」无关，切换需重启 */
+const dbFileDir = ref('')
 
 const loading = ref(true)
 const saving = ref(false)
 const loadError = ref('')
 
-const newFolder = ref('')
-const addingFolder = ref(false)
-const newCodeRoot = ref('')
-const addingCodeRoot = ref(false)
 const newBrand = ref('')
 const addingBrand = ref(false)
 const indexing = ref(false)
@@ -80,12 +217,10 @@ let indexTimer: number | null = null
 
 const status = computed(() => configStore.status)
 const cfg = computed(() => configStore.config)
-const vaultOk = computed(() => !!status.value?.vault_root_valid)
-const pdfOk = computed(() => !!status.value?.pdf_root_valid)
 const configComplete = computed(() => !!status.value?.config_complete)
 
 const missingText = computed(() => {
-  const map: Record<string, string> = { llm: 'LLM', embedding: 'Embedding', vault_root: 'Vault 路径' }
+  const map: Record<string, string> = { llm: 'LLM', embedding: 'Embedding', vault_root: '笔记根目录' }
   return (status.value?.missing_config_keys ?? []).map((k) => map[k] ?? k).join('、')
 })
 
@@ -124,12 +259,25 @@ function embeddingPayload() {
   return p
 }
 
+function normRoots(list: string[]): string[] {
+  const out: string[] = []
+  for (const x of list) {
+    const s = (x ?? '').trim()
+    if (s && !out.includes(s)) out.push(s)
+  }
+  return out.slice(0, 3)
+}
+
 function pathsPayload() {
   return {
     vault_root: paths.vault_root.trim(),
     notes_folder: paths.notes_folder.trim(),
     pdf_root: paths.pdf_root.trim(),
-    code_roots: paths.code_roots.map((s) => s.trim()).filter(Boolean),
+    code_roots: normRoots(paths.code_roots),
+    after_sales_roots: normRoots(paths.after_sales_roots),
+    memo_roots: normRoots(paths.memo_roots),
+    pdf_roots: normRoots(paths.pdf_roots),
+    db_roots: normRoots(paths.db_roots),
   }
 }
 
@@ -145,7 +293,7 @@ function snapshot() {
     llm: JSON.stringify(llmPayload()),
     embedding: JSON.stringify(embeddingPayload()),
     paths: JSON.stringify(pathsPayload()),
-    whitelist: JSON.stringify([...whitelist.value].map((s) => s.trim()).filter(Boolean)),
+    dbFile: dbFileDir.value.trim(),
     dashboard: JSON.stringify(dashboardPayload()),
   }
 }
@@ -155,7 +303,7 @@ const applied = ref<Record<SectionKey, string>>({
   llm: '',
   embedding: '',
   paths: '',
-  whitelist: '',
+  dbFile: '',
   dashboard: '',
 })
 
@@ -165,7 +313,7 @@ const dirty = computed(() => {
     llm: now.llm !== applied.value.llm,
     embedding: now.embedding !== applied.value.embedding,
     paths: now.paths !== applied.value.paths,
-    whitelist: now.whitelist !== applied.value.whitelist,
+    dbFile: now.dbFile !== applied.value.dbFile,
     dashboard: now.dashboard !== applied.value.dashboard,
   }
 })
@@ -191,13 +339,8 @@ function syncFromStore() {
     model: c.embedding?.model ?? '',
     dim: c.embedding?.dim ?? 0,
   })
-  Object.assign(paths, {
-    vault_root: c.paths?.vault_root ?? '',
-    notes_folder: c.paths?.notes_folder ?? '',
-    pdf_root: c.paths?.pdf_root ?? '',
-    code_roots: [...(c.paths?.code_roots ?? [])],
-  })
-  whitelist.value = [...(c['index.whitelist']?.folders ?? [])]
+  Object.assign(paths, buildPathsForm(c))
+  dbFileDir.value = dbLoc.value?.dir ?? ''
   Object.assign(dashboard, {
     follow_up_days: c.dashboard?.follow_up_days ?? 7,
     default_range: c.dashboard?.default_range ?? 'month',
@@ -207,17 +350,54 @@ function syncFromStore() {
   showEmbKey.value = false
 }
 
+/** 路径表单：新多位置字段优先；为空时用旧单值字段推导出「当前生效位置」预填，避免界面空白 */
+function buildPathsForm(c: Record<string, any>) {
+  const raw = (c.paths ?? {}) as Record<string, any>
+  const vr = String(raw.vault_root ?? '').trim()
+  const nf = String(raw.notes_folder ?? '').trim() || '客户售后问题'
+  const legacyAfterSales = vr ? `${vr.replace(/[\\/]+$/, '')}\\${nf}` : ''
+  const afterSales: string[] = Array.isArray(raw.after_sales_roots)
+    ? [...raw.after_sales_roots]
+    : legacyAfterSales
+      ? [legacyAfterSales]
+      : []
+  const pdfRoots: string[] = Array.isArray(raw.pdf_roots)
+    ? [...raw.pdf_roots]
+    : raw.pdf_root
+      ? [String(raw.pdf_root)]
+      : []
+  return {
+    vault_root: vr,
+    notes_folder: String(raw.notes_folder ?? ''),
+    pdf_root: String(raw.pdf_root ?? ''),
+    code_roots: [...(raw.code_roots ?? [])],
+    after_sales_roots: afterSales,
+    memo_roots: [...(raw.memo_roots ?? [])],
+    pdf_roots: pdfRoots,
+    db_roots: [...(raw.db_roots ?? [])],
+  }
+}
+
 async function loadPage() {
   loading.value = true
   loadError.value = ''
   try {
     await configStore.load()
+    await Promise.all([refreshDbLocation(), refreshBrands()])
     syncFromStore()
-    await Promise.all([refreshSide(), refreshBrands()])
+    await refreshSide()
   } catch (e) {
     loadError.value = (e as Error).message
   } finally {
     loading.value = false
+  }
+}
+
+async function refreshDbLocation() {
+  try {
+    dbLoc.value = await configApi.dbLocation()
+  } catch {
+    dbLoc.value = null
   }
 }
 
@@ -267,25 +447,36 @@ async function saveAll() {
       })
     }
     if (dirty.value.paths) {
-      await step('路径', async () => {
+      await step('索引位置', async () => {
         const prev = JSON.parse(applied.value.paths || '{}') as Record<string, any>
         const next = pathsPayload()
         await configStore.save({ paths: next })
-        // 只有换了 vault / 笔记目录才需要重扫；只改代码根目录不该触发全库补齐
-        if (prev.vault_root !== next.vault_root || prev.notes_folder !== next.notes_folder) {
+        const vaultChanged =
+          prev.vault_root !== next.vault_root || prev.notes_folder !== next.notes_folder
+        const rootsChanged =
+          JSON.stringify(prev.after_sales_roots ?? []) !== JSON.stringify(next.after_sales_roots) ||
+          JSON.stringify(prev.memo_roots ?? []) !== JSON.stringify(next.memo_roots) ||
+          JSON.stringify(prev.db_roots ?? []) !== JSON.stringify(next.db_roots)
+        if (vaultChanged || rootsChanged) {
           const r = await kbApi.autofill()
           if (r.started) saveNote = `已排入 ${r.pending} 篇待索引`
         }
+        // 代码根目录变化 → 触发仓库后台扫描，让代码仓库页即时发现
+        if (JSON.stringify(prev.code_roots ?? []) !== JSON.stringify(next.code_roots)) {
+          try {
+            await reposApi.refresh()
+          } catch {
+            /* 扫描失败不阻断保存 */
+          }
+        }
       })
     }
-    if (dirty.value.whitelist) {
-      await step('索引范围', async () => {
-        const r = await kbApi.saveWhitelist(
-          whitelist.value.map((s) => s.trim()).filter(Boolean),
-        )
-        whitelist.value = r.folders
-        if (r.invalid?.length) saveNote = `目录不存在：${r.invalid.join('、')}（已保留配置）`
-        else if (r.indexing) saveNote = `${r.pending} 篇转入后台索引`
+    if (dirty.value.dbFile) {
+      await step('数据库文件位置', async () => {
+        const dir = dbFileDir.value.trim()
+        if (!dir) throw new Error('「程序数据库文件位置」不能为空')
+        const r = await configApi.saveDbLocation(dir)
+        if (r.restart_required) saveNote = '数据库文件位置已切换，重启后端后生效'
       })
     }
     if (dirty.value.dashboard) {
@@ -296,8 +487,9 @@ async function saveAll() {
 
     // 以服务端返回为准重建表单（掩码密钥会被清掉，维度等读回）
     await configStore.load()
+    await Promise.all([refreshDbLocation(), refreshBrands()])
     syncFromStore()
-    await Promise.all([refreshSide(), refreshBrands()])
+    await refreshSide()
 
     const tail = saveNote ? `；${saveNote}` : ''
     ui.toast(
@@ -386,63 +578,7 @@ async function testEmbedding() {
   }
 }
 
-// ---- 路径 / 白名单 / 索引 --------------------------------------------------
-
-async function addCodeRoot() {
-  const v = newCodeRoot.value.trim()
-  if (!v) return
-  if (paths.code_roots.includes(v)) {
-    ui.toast('warn', '该目录已在列表中')
-    return
-  }
-  if (paths.code_roots.length >= 3) {
-    ui.toast('warn', '最多添加 3 个代码根目录')
-    return
-  }
-  paths.code_roots.push(v)
-  newCodeRoot.value = ''
-  addingCodeRoot.value = false
-  await saveCodeRoots('已添加并保存目录')
-}
-
-async function removeCodeRoot(v: string) {
-  paths.code_roots = paths.code_roots.filter((x) => x !== v)
-  await saveCodeRoots('已移除并保存目录')
-}
-
-/** 代码根目录增删后立即落库并触发仓库扫描（免手动点「保存设置」） */
-async function saveCodeRoots(successText: string) {
-  try {
-    await configStore.save({ paths: pathsPayload() })
-    await configStore.load()
-    syncFromStore()
-    // 触发仓库后台扫描，让代码仓库页即时发现新目录
-    try {
-      await reposApi.refresh()
-    } catch {
-      /* 扫描失败不阻断保存提示 */
-    }
-    ui.toast('success', successText)
-  } catch (e) {
-    ui.toast('error', `保存失败：${(e as Error).message}`)
-  }
-}
-
-function addFolder() {
-  const v = newFolder.value.trim()
-  if (!v) return
-  if (whitelist.value.some((f) => f.toLowerCase() === v.toLowerCase())) {
-    ui.toast('warn', '该目录已在索引范围内')
-    return
-  }
-  whitelist.value.push(v)
-  newFolder.value = ''
-  addingFolder.value = false
-}
-
-function removeFolder(v: string) {
-  whitelist.value = whitelist.value.filter((f) => f !== v)
-}
+// ---- 路径 / 索引 ----------------------------------------------------------
 
 async function reindexAll() {
   indexing.value = true
@@ -765,179 +901,138 @@ const indexPct = computed(() => {
         </div>
       </section>
 
-      <!-- ==================== 路径与索引 ==================== -->
+      <!-- ==================== 索引位置 ==================== -->
       <section class="card cfg-card span2">
         <header class="cfg-head">
           <div class="cfg-ic amber"><Icon name="folder" :size="17" /></div>
           <div class="cfg-head-text">
-            <h3>路径与索引</h3>
-            <span>文件读写位置、索引范围、待跟进阈值</span>
+            <h3>索引位置</h3>
+            <span>5 类索引位置各自可自定义、最多 3 个（第 1 个为主位置）</span>
           </div>
-          <span class="badge" :class="vaultOk ? 'ok-soft' : 'warn'">
-            <span class="dot" :class="vaultOk ? 'ok' : 'warn'" />
-            {{ vaultOk ? 'Vault 已连接' : 'Vault 未连接' }}
-          </span>
         </header>
 
-        <div class="cfg-body cfg-grid-2">
-          <div class="cfg-col">
-            <label class="field">
-              <span class="field-label">
-                Obsidian Vault 根目录
-                <span class="status-inline" :class="vaultOk ? 'ok' : 'bad'">
-                  {{ vaultOk ? '有效' : '未校验' }}
-                </span>
-              </span>
-              <input
-                v-model="paths.vault_root"
-                class="input mono"
-                placeholder="D:\Notes"
-                spellcheck="false"
-              />
-            </label>
-
-            <label class="field">
-              <span class="field-label">售后笔记文件夹（vault 内相对名）</span>
-              <input v-model="paths.notes_folder" class="input mono" placeholder="客户售后问题" />
-            </label>
-
-            <label class="field">
-              <span class="field-label">
-                PDF 手册根目录
-                <span class="status-inline" :class="pdfOk ? 'ok' : 'bad'">
-                  {{ pdfOk ? '有效' : '未校验' }}
-                </span>
-              </span>
-              <input
-                v-model="paths.pdf_root"
-                class="input mono"
-                placeholder="D:\Manuals"
-                spellcheck="false"
-              />
-            </label>
-
-            <div class="field">
-              <span class="field-label">
-                代码仓库根目录
-                <em class="field-badge">三期使用 · 最多 3 个</em>
-              </span>
-              <div class="chips">
-                <span v-for="r in paths.code_roots" :key="r" class="chip" :title="r">
-                  <Icon name="git" :size="12" />
-                  <span class="chip-text">{{ r }}</span>
-                  <button type="button" title="移除" @click="removeCodeRoot(r)">
+        <div class="cfg-body">
+          <div class="loc-grid">
+            <div v-for="g in ROOT_GROUPS" :key="g.key" class="loc-group">
+              <div class="loc-head">
+                <Icon :name="g.icon" :size="13" />
+                <b>{{ g.label }}</b>
+                <em class="field-badge">最多 3 个</em>
+              </div>
+              <div class="loc-slots">
+                <div v-for="(_, i) in rootsOf(g.key)" :key="i" class="loc-slot">
+                  <span class="loc-tag" :class="{ main: i === 0 }">{{ i === 0 ? '主' : i + 1 }}</span>
+                  <input
+                    v-model="paths[g.key][i]"
+                    class="input mono"
+                    :placeholder="g.placeholder"
+                    spellcheck="false"
+                  />
+                  <button
+                    class="loc-pick"
+                    type="button"
+                    title="从文件夹中选择"
+                    :disabled="picking"
+                    @click="repickRoot(g.key, i)"
+                  >
+                    <Icon name="folder" :size="12" />
+                  </button>
+                  <button class="loc-del" type="button" title="移除该位置" @click="removeRoot(g.key, i)">
                     <Icon name="x" :size="11" />
                   </button>
-                </span>
-                <span v-if="!paths.code_roots.length && !addingCodeRoot" class="chips-empty">
-                  暂未添加
+                </div>
+                <span v-if="!rootsOf(g.key).length" class="chips-empty">
+                  {{ g.key === 'after_sales_roots' || g.key === 'memo_roots' ? '未配置（使用默认位置）' : '未配置' }}
                 </span>
                 <button
-                  v-if="!addingCodeRoot"
+                  v-if="rootsOf(g.key).length < 3"
                   class="chip add"
                   type="button"
-                  @click="addingCodeRoot = true"
+                  :disabled="picking"
+                  title="打开文件夹选择框"
+                  @click="addRoot(g.key)"
                 >
-                  <Icon name="plus" :size="11" />添加目录
+                  <Icon name="plus" :size="11" />{{ picking ? '等待选择…' : '添加位置' }}
                 </button>
-                <span v-else class="chip-input">
-                  <input
-                    v-model="newCodeRoot"
-                    class="input mono"
-                    placeholder="D:\Code"
-                    spellcheck="false"
-                    @keyup.enter="addCodeRoot"
-                    @keyup.esc="addingCodeRoot = false"
-                  />
-                  <button class="btn primary sm" type="button" @click="addCodeRoot">添加</button>
-                </span>
               </div>
+              <span class="field-help">{{ g.hint }}</span>
             </div>
           </div>
 
-          <div class="cfg-col">
-            <div class="field">
+          <div class="db-file-field">
+            <label class="field">
               <span class="field-label">
-                索引范围（白名单）
-                <em class="field-badge">目录级 · 一期</em>
+                程序数据库文件位置
+                <em class="field-badge">workbench.db · 切换需重启</em>
               </span>
-              <div class="chips">
-                <span v-for="f in whitelist" :key="f" class="chip" :title="f">
-                  <Icon name="folder" :size="12" />
-                  <span class="chip-text">{{ f }}</span>
-                  <button type="button" title="移出索引范围" @click="removeFolder(f)">
-                    <Icon name="x" :size="11" />
-                  </button>
-                </span>
-                <span v-if="!whitelist.length && !addingFolder" class="chips-empty">
-                  空 · 暂无目录纳入索引
-                </span>
-                <button
-                  v-if="!addingFolder"
-                  class="chip add"
-                  type="button"
-                  @click="addingFolder = true"
-                >
-                  <Icon name="plus" :size="11" />添加目录
+              <div class="db-dir-row">
+                <input
+                  v-model="dbFileDir"
+                  class="input mono"
+                  placeholder="D:\AkaiRyeData"
+                  spellcheck="false"
+                />
+                <button class="btn ghost sm" type="button" :disabled="picking" @click="pickDbFileDir">
+                  <Icon name="folder" :size="13" />选择…
                 </button>
-                <span v-else class="chip-input">
-                  <input
-                    v-model="newFolder"
-                    class="input mono"
-                    placeholder="vault 内相对名或绝对路径"
-                    spellcheck="false"
-                    @keyup.enter="addFolder"
-                    @keyup.esc="addingFolder = false"
-                  />
-                  <button class="btn primary sm" type="button" @click="addFolder">添加</button>
-                </span>
               </div>
               <span class="field-help">
-                减少目录会同时删除对应切块；新增目录保存后转后台增量索引。
+                知识库自身的索引数据库（切块 + 向量）存放目录，与上面的「数据库索引位置」资料目录无关；
+                切换时自动复制现有库，重启后端后生效。当前：{{ dbLoc?.db_file || '—' }}
               </span>
-            </div>
+            </label>
+          </div>
 
-            <div class="cfg-row">
-              <label class="field narrow">
-                <span class="field-label">待跟进阈值</span>
-                <div class="input-suffix">
-                  <input v-model.number="dashboard.follow_up_days" class="input mono" type="number" min="1" max="90" />
-                  <em>天</em>
+          <div class="loc-bottom">
+            <div class="cfg-col">
+              <div class="cfg-row dash-row">
+                <label class="field narrow">
+                  <span class="field-label">待跟进阈值</span>
+                  <div class="input-suffix">
+                    <input
+                      v-model.number="dashboard.follow_up_days"
+                      class="input mono"
+                      type="number"
+                      min="1"
+                      max="90"
+                    />
+                    <em>天</em>
+                  </div>
+                </label>
+                <label class="field">
+                  <span class="field-label">看板默认范围</span>
+                  <select v-model="dashboard.default_range" class="input">
+                    <option v-for="(label, v) in RANGE_LABEL" :key="v" :value="v">{{ label }}</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="index-mini">
+                <div class="im">
+                  <b>{{ readyNotes }}<em>/{{ totalNotes }}</em></b>
+                  <span>笔记已索引</span>
                 </div>
-              </label>
-              <label class="field">
-                <span class="field-label">看板默认范围</span>
-                <select v-model="dashboard.default_range" class="input">
-                  <option v-for="(label, v) in RANGE_LABEL" :key="v" :value="v">{{ label }}</option>
-                </select>
-              </label>
-            </div>
+                <div class="im">
+                  <b>{{ chunkCount.toLocaleString() }}</b>
+                  <span>切块</span>
+                </div>
+                <div class="im">
+                  <b>{{ vectorDim || '—' }}</b>
+                  <span>向量维度</span>
+                </div>
+                <button class="btn ghost sm" :disabled="indexing || indexRunning" @click="reindexAll">
+                  <Icon name="refresh" :size="13" />
+                  <span>{{ indexRunning ? '索引中…' : '重建全部索引' }}</span>
+                </button>
+              </div>
 
-            <div class="index-mini">
-              <div class="im">
-                <b>{{ readyNotes }}<em>/{{ totalNotes }}</em></b>
-                <span>笔记已索引</span>
+              <div v-if="indexRunning" class="index-progress">
+                <div class="ip-head">
+                  <span>{{ kbStats?.indexing?.current || '正在建立索引' }}</span>
+                  <em>{{ indexPct }}%</em>
+                </div>
+                <div class="ip-bar"><i :style="{ width: indexPct + '%' }" /></div>
               </div>
-              <div class="im">
-                <b>{{ chunkCount.toLocaleString() }}</b>
-                <span>切块</span>
-              </div>
-              <div class="im">
-                <b>{{ vectorDim || '—' }}</b>
-                <span>向量维度</span>
-              </div>
-              <button class="btn ghost sm" :disabled="indexing || indexRunning" @click="reindexAll">
-                <Icon name="refresh" :size="13" />
-                <span>{{ indexRunning ? '索引中…' : '重建全部索引' }}</span>
-              </button>
-            </div>
-
-            <div v-if="indexRunning" class="index-progress">
-              <div class="ip-head">
-                <span>{{ kbStats?.indexing?.current || '正在建立索引' }}</span>
-                <em>{{ indexPct }}%</em>
-              </div>
-              <div class="ip-bar"><i :style="{ width: indexPct + '%' }" /></div>
             </div>
           </div>
         </div>
@@ -1116,6 +1211,91 @@ const indexPct = computed(() => {
 .cfg-row { display: flex; gap: 9px; align-items: flex-start; }
 .cfg-row .field { flex: 1; min-width: 0; }
 .cfg-row .field.narrow { flex: 0 0 118px; }
+
+/* ---------------- 5 类索引位置 ---------------- */
+.loc-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 22px;
+  margin: 4px 0 6px;
+}
+.loc-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: #fbfaf7;
+}
+.loc-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-2);
+}
+.loc-head b { font-size: 11.5px; font-weight: 600; }
+.loc-head .field-badge { margin-left: auto; }
+.loc-slots { display: flex; flex-direction: column; gap: 5px; }
+.loc-slot { display: flex; align-items: center; gap: 6px; }
+.loc-slot .input { flex: 1; min-width: 0; }
+.loc-tag {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--muted);
+  background: #f1efe9;
+  border: 1px solid var(--line-soft);
+}
+.loc-tag.main { color: var(--blue-ink); background: var(--blue-soft); border-color: var(--blue-line); }
+.loc-del {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.loc-del:hover { color: var(--red-ink, #b3261e); border-color: var(--line-soft); background: #fff; }
+/* 行内「从文件夹中选择」：与删除按钮同尺寸，不抢输入框宽度 */
+.loc-pick {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.loc-pick:hover:not(:disabled) { color: var(--blue-ink); border-color: var(--line-soft); background: #fff; }
+.loc-pick:disabled { opacity: 0.4; cursor: default; }
+/* 程序数据库文件位置：输入框 + 选择按钮同行 */
+.db-dir-row { display: flex; gap: 6px; align-items: center; }
+.db-dir-row .input { flex: 1; min-width: 0; }
+.db-dir-row .btn { flex: none; }
+.loc-bottom { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line-soft); }
+/* 看板两项：单行时不铺满整宽，避免下拉框被拉得过长 */
+.dash-row { max-width: 420px; }
+.db-file-field { margin-top: 4px; padding-top: 11px; border-top: 1px dashed var(--line-soft); }
+@media (max-width: 1080px) {
+  .loc-grid { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* ---------------- 表单 ---------------- */
 .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }

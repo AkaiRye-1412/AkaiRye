@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS note_file (
     summary        TEXT,                           -- description → 正文首段（截断）
     tags           TEXT,                           -- 逗号分隔；兼容 YAML 列表与 [a, b] 内联
     note_mode      TEXT CHECK (note_mode IN ('project','card')),  -- 项目笔记 / 按日期卡片
+    -- after_sales 售后笔记 / memo 随手笔记 / kb 知识库资料目录（要解析的文档）
+    note_type      TEXT CHECK (note_type IN ('after_sales','memo','kb')),
     scanned_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_note_file_status    ON note_file (status);

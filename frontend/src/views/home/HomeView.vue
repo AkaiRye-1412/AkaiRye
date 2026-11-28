@@ -272,11 +272,13 @@ const groupedProjects = computed(() => {
   return groups.sort((a, b) => b.latest.localeCompare(a.latest))
 })
 
-/** 客户分布横条：以最大记录数归一化（原型 Charts.clients 口径）。 */
+/** 客户分布横条：以最大记录数归一化（原型 Charts.clients 口径）。
+ *  用 customer_all（全量）而不是 Top N——只取前 5 时，新建的小客户会被同数量的老客户挤掉，
+ *  表现为「加了客户但分布里没有」。旧后端没有该字段时回退 customer_top。 */
 const customerRows = computed(() => {
-  const top = summary.value?.customer_top ?? []
-  const max = Math.max(1, ...top.map((x) => x.total))
-  return top.map((x) => ({ ...x, pct: Math.max(4, Math.round((x.total / max) * 100)) }))
+  const list = summary.value?.customer_all ?? summary.value?.customer_top ?? []
+  const max = Math.max(1, ...list.map((x) => x.total))
+  return list.map((x) => ({ ...x, pct: Math.max(4, Math.round((x.total / max) * 100)) }))
 })
 
 function toggleGroup(customer: string) {
@@ -538,12 +540,19 @@ onBeforeUnmount(() => {
             <div class="chart-head">
               <div>
                 <h3>客户分布</h3>
-                <span>按记录数 · 含未结项目</span>
+                <span>
+                  按记录数 · 共 {{ customerRows.length }} 个客户<template v-if="customerRows.length > 5"> · 列表可滚动</template>
+                </span>
               </div>
             </div>
             <div v-if="customerRows.length" class="hbar-list">
-              <div v-for="c in customerRows" :key="c.customer" class="hbar-row">
-                <span class="hbar-name" :title="c.customer">{{ c.customer }}</span>
+              <div
+                v-for="c in customerRows"
+                :key="c.customer"
+                class="hbar-row"
+                :title="c.last_updated ? `${c.customer} · 最近更新 ${c.last_updated}` : c.customer"
+              >
+                <span class="hbar-name">{{ c.customer }}</span>
                 <span class="hbar-track">
                   <span class="hbar-fill" :style="{ width: c.pct + '%' }">
                     <span class="hbar-value">{{ c.total }}</span>
@@ -657,7 +666,7 @@ onBeforeUnmount(() => {
         <header class="card-head">
           <div class="card-title">
             <span class="repos-title-ic"><Icon name="git" :size="15" /></span>
-            <h2>代码仓库</h2>
+            <h2>项目开发</h2>
             <span class="count-pill">{{ repos.length }}</span>
             <span v-if="repoDirtyTotal" class="repos-dirty-pill">⏳ {{ repoDirtyTotal }} 处未提交</span>
           </div>
@@ -672,7 +681,7 @@ onBeforeUnmount(() => {
         <!-- 未配置 / 无仓库 -->
         <div v-else-if="!repos.length" class="repos-empty">
           <span class="repos-empty-ic"><Icon name="git" :size="18" /></span>
-          <span>尚未发现代码仓库，可在「设置 → 代码仓库根目录」配置</span>
+          <span>尚未发现项目，可在「设置 → 项目开发索引位置」配置</span>
           <button class="link-btn" @click="router.push('/settings')">去设置 ›</button>
         </div>
 

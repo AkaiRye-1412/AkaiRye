@@ -123,7 +123,10 @@
 .notes-group-label {
   display: flex; align-items: center; gap: 6px; padding: 6px 18px; font-size: 10.5px;
   color: var(--muted); background: #faf9f5; border-top: 1px solid var(--line-soft);
+  cursor: pointer; user-select: none;
 }
+.notes-group-label:hover { background: #f2f1ec; }
+.notes-group-label.collapsed { border-bottom: 1px solid var(--line-soft); background: #f5f4ef; }
 .notes-group-label span { color: #b6b2a7; }
 .note-row { padding: 9px 18px; border-top: 1px solid #f4f3ee; cursor: pointer; transition: background .1s; }
 .note-row:hover { background: #f8f9fb; }

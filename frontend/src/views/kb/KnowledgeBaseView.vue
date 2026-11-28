@@ -19,7 +19,6 @@ const ui = useUiStore()
 const stats = ref<KbStats | null>(null)
 const notes = ref<KbNote[]>([])
 
-const keyword = ref('')
 const statusFilter = ref<'' | 'ready' | 'pending' | 'failed' | 'excluded'>('')
 const loadError = ref('')
 const busy = ref(false)
@@ -53,16 +52,8 @@ const counts = computed(
   () => stats.value?.notes_by_status ?? { ready: 0, pending: 0, failed: 0, excluded: 0, unindexed: 0 },
 )
 
-/** 过滤后的笔记（后端已按状态/关键词粗筛，这里再按本地输入精确过滤一次） */
-const filtered = computed(() => {
-  const kw = keyword.value.trim().toLowerCase()
-  if (!kw) return notes.value
-  return notes.value.filter((n) =>
-    [n.display_name, n.note_title, n.customer, n.project_name, n.group]
-      .filter(Boolean)
-      .some((v) => String(v).toLowerCase().includes(kw)),
-  )
-})
+/** 过滤后的笔记（状态筛选在后端完成，这里直接用返回结果） */
+const filtered = computed(() => notes.value)
 
 interface Group {
   name: string
@@ -325,24 +316,24 @@ onUnmounted(() => {
       </header>
 
       <div class="kb-metrics">
-        <div class="metric">
+        <div class="metric" data-tone="green">
           <b>{{ counts.ready }}</b>
           <span>已索引</span>
           <em>共 {{ stats?.notes ?? 0 }} 篇</em>
         </div>
-        <div class="metric" :class="{ warn: counts.pending + counts.unindexed > 0 }">
+        <div class="metric" :class="{ warn: counts.pending + counts.unindexed > 0 }" data-tone="amber">
           <b>{{ counts.pending + counts.unindexed }}</b>
           <span>待索引</span>
           <em>{{ counts.failed ? `${counts.failed} 篇失败` : '可自动补齐' }}</em>
         </div>
-        <div class="metric">
+        <div class="metric" data-tone="blue">
           <b>{{ stats?.chunks ?? 0 }}</b>
           <span>切块</span>
           <em>{{ stats?.manuals ? `含 ${stats.manuals} 本手册` : '检索最小单元' }}</em>
         </div>
-        <div class="metric">
-          <b class="model">{{ stats?.vector_model.model_id || '未配置' }}</b>
-          <span>向量模型{{ stats?.vector_model.dim ? ` · ${stats.vector_model.dim} 维` : '' }}</span>
+        <div class="metric" data-tone="violet">
+          <b class="model" :class="{ off: !stats?.vector_model.model_id }">{{ stats?.vector_model.model_id || '未配置' }}</b>
+          <span class="model-dim">{{ stats?.vector_model.dim ? `${stats.vector_model.dim} 维 · 向量模型` : '向量模型' }}</span>
           <em v-if="stats?.vector_model.model_id">最近索引 {{ fmtTime(stats?.last_indexed_at ?? null) }}</em>
           <em v-else>未配置时仅关键词检索</em>
         </div>
@@ -379,13 +370,6 @@ onUnmounted(() => {
           <span class="count-pill">{{ filtered.length }}</span>
         </div>
         <div class="kb-tools">
-          <div class="search-field">
-            <Icon name="search" :size="15" />
-            <input v-model="keyword" placeholder="搜索标题、客户或路径…" autocomplete="off" />
-            <button v-if="keyword" class="search-clear" title="清空" @click="keyword = ''">
-              <Icon name="x" :size="12" />
-            </button>
-          </div>
           <div class="seg sm">
             <button
               v-for="f in filters"
@@ -475,7 +459,7 @@ onUnmounted(() => {
 
         <div v-if="!filtered.length" class="kb-empty">
           <Icon name="layers" :size="22" />
-          <p v-if="keyword || statusFilter">没有符合条件的笔记</p>
+          <p v-if="statusFilter">没有符合条件的笔记</p>
           <p v-else-if="!stats?.notes">还没有扫描到笔记——先在设置页配置 vault 根目录</p>
           <p v-else>暂无笔记</p>
         </div>
@@ -487,7 +471,8 @@ onUnmounted(() => {
     </section>
 
     <!-- ==================== PDF 手册（M9 手册侧：解析入库 + 队列状态） ==================== -->
-    <PdfManuals compact />
+    <!-- scope="kb"：只列「数据库索引位置」内的 PDF，手册页仍可浏览全部 -->
+    <PdfManuals compact scope="kb" />
   </div>
 </template>
 
@@ -513,37 +498,88 @@ onUnmounted(() => {
 .kb-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1px;
-  background: var(--line-soft);
+  gap: 8px;
+  background: transparent;
   border-top: 1px solid var(--line-soft);
+  padding: 10px 0 2px;
 }
 .metric {
   background: var(--card);
-  padding: 10px 14px 11px;
+  padding: 12px 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 3px;
   min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
 }
+/* 顶部彩色细条：给四格做视觉区分与色彩强调 */
+.metric::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--muted);
+  opacity: 0.55;
+}
+.metric[data-tone='green']::before { background: var(--green); }
+.metric[data-tone='amber']::before { background: var(--amber); }
+.metric[data-tone='blue']::before { background: var(--blue); }
+.metric[data-tone='violet']::before { background: var(--violet); }
 .metric b {
-  font-size: 19px;
-  font-weight: 640;
-  line-height: 1.25;
+  font-size: 22px;
+  font-weight: 680;
+  line-height: 1.15;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
+  letter-spacing: -0.01em;
 }
+.metric[data-tone='green'] b { color: var(--green-ink); }
+.metric[data-tone='blue'] b { color: var(--blue-ink); }
+.metric[data-tone='violet'] b { color: var(--ink); }
 .metric b.model {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
-  line-height: 1.45;
+  line-height: 1.4;
   color: var(--ink-2);
   word-break: break-all;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  min-height: 34px;
+  letter-spacing: 0;
 }
-.metric span { font-size: 11.5px; color: var(--ink-2); }
+.metric b.model.off {
+  color: var(--muted);
+  font-weight: 500;
+  min-height: auto;
+}
+.metric span {
+  font-size: 11.5px;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 第四格：维度做成小徽章，与模型名/说明文字区分层级 */
+.metric span.model-dim {
+  font-size: 10px;
+  color: var(--violet);
+  font-weight: 600;
+}
+.metric span.model-dim::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--violet);
+  opacity: 0.7;
+}
 .metric em { font-size: 10.5px; color: var(--muted); font-style: normal; }
 .metric.warn b { color: var(--amber-ink); }
 
@@ -598,8 +634,6 @@ onUnmounted(() => {
   min-width: 0;
   flex-wrap: wrap;
 }
-/* 搜索框在工具条里按剩余空间伸缩，避免把分段按钮挤到第二行 */
-.kb-tools .search-field { flex: 1 1 160px; min-width: 110px; max-width: 280px; }
 
 .kb-table-head,
 .kb-row {
@@ -768,7 +802,6 @@ onUnmounted(() => {
   .kb-notes .card-title { margin-right: 0; }
   /* column 方向下 flex:1 1 320px 会被当成高度，必须复位为按内容 */
   .kb-tools { flex: 0 0 auto; justify-content: flex-start; flex-wrap: nowrap; }
-  .kb-tools .search-field { flex: 1 1 auto; min-width: 110px; max-width: none; }
   .kb-notes .seg { flex: none; }
   .kb-table-head,
   .kb-row { grid-template-columns: minmax(0, 1fr) 66px 48px 62px; }

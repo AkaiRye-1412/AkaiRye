@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_db
 from app.db import database
-from app.services import manual_index
+from app.services import manual_index, pdf_scan
 
 router = APIRouter(prefix="/api", tags=["manuals"])
 
@@ -58,7 +58,11 @@ def list_manuals(
 
 @router.post("/manuals/ingest")
 def ingest_manuals(body: IngestBody | None = None, conn: Connection = Depends(get_db)) -> dict:
-    """M9 一键入库触发；已在队列中的自动跳过（幂等）。"""
+    """M9 一键入库触发；已在队列中的自动跳过（幂等）。
+
+    只有位于「数据库索引位置」（paths.db_roots）内的 PDF 才能进知识库；
+    「PDF 手册索引位置」内的 PDF 仅用于手册页浏览，不能入库。
+    """
     ids = body.manual_ids if body else None
     action = (body.action if body else "ingest") or "ingest"
     if action not in ("ingest", "rebuild"):
@@ -72,11 +76,28 @@ def ingest_manuals(body: IngestBody | None = None, conn: Connection = Depends(ge
         if action == "rebuild":
             sql = "SELECT id FROM manual WHERE status IN ('ready','update','invalid','failed')"
         ids = [r["id"] for r in conn.execute(sql).fetchall()]
+
+    # 入库范围闸门：仅「数据库索引位置」内的 PDF（按当前配置实时判定）
+    in_kb = {
+        r["id"]
+        for r in conn.execute("SELECT id, path FROM manual").fetchall()
+        if pdf_scan.in_kb_roots(conn, Path(r["path"]))
+    }
+    outside = [i for i in ids if i not in in_kb]
+    ids = [i for i in ids if i in in_kb]
     if not ids:
+        if outside:
+            return {
+                "started": False,
+                "queued": [],
+                "skipped": [],
+                "skipped_outside": outside,
+                "reason": "这些 PDF 不在「数据库索引位置」内，无法加入知识库",
+            }
         return {"started": False, "queued": [], "skipped": [], "reason": "没有可入库的手册"}
     result = manual_index.enqueue(conn, ids, action=action)
     started = manual_index.start(database.connect) if result["queued"] else {"started": False}
-    return {**result, **started, "pending": len(result["queued"])}
+    return {**result, **started, "pending": len(result["queued"]), "skipped_outside": outside}
 
 
 @router.get("/manuals/{manual_id}")
@@ -109,9 +130,15 @@ def manual_detail(manual_id: int, conn: Connection = Depends(get_db)) -> dict:
 
 @router.post("/manuals/{manual_id}/rebuild")
 def rebuild(manual_id: int, conn: Connection = Depends(get_db)) -> dict:
-    """重建索引：旧块保留到新解析完成，重建期间仍可检索（OQ-12）。"""
-    if conn.execute("SELECT 1 FROM manual WHERE id=?", (manual_id,)).fetchone() is None:
+    """重建索引：旧块保留到新解析完成，重建期间仍可检索（OQ-12）；仅知识库范围内的 PDF。"""
+    row = conn.execute("SELECT path FROM manual WHERE id=?", (manual_id,)).fetchone()
+    if row is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "手册不存在"})
+    if not pdf_scan.in_kb_roots(conn, Path(row["path"])):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "path_outside_root", "message": "该 PDF 不在「数据库索引位置」内，无法重建知识库索引"},
+        )
     result = manual_index.enqueue(conn, [manual_id], action="rebuild")
     started = manual_index.start(database.connect) if result["queued"] else {"started": False}
     if result["skipped"]:

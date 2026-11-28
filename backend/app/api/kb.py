@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_db
 from app.db import database
-from app.services import config_service, indexer, vault
+from app.services import config_service, indexer, pdf_scan, vault
 from app.ws.events import broker
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,12 @@ def _present(conn, rel: str) -> tuple[str, str]:
         return rel_notes.as_posix(), "售后卡片"
     except (ValueError, OSError):
         pass
+    for root in vault.db_roots(conn):
+        try:
+            rel_dir = abs_p.resolve().relative_to(root.resolve())
+            return rel_dir.as_posix(), "数据库"
+        except (ValueError, OSError):
+            continue
     for key, abs_dir in vault.whitelist_abs_dirs(conn):
         try:
             rel_dir = abs_p.resolve().relative_to(Path(abs_dir).resolve())
@@ -204,7 +210,12 @@ def stats(conn: Connection = Depends(get_db)) -> dict:
     """笔记数/手册数/切块总数/向量模型标识与维度（R4）+ 索引任务进度 + 最近索引时间。"""
     chunk_count = conn.execute("SELECT COUNT(*) c FROM chunk WHERE status='ready'").fetchone()["c"]
     note_count = conn.execute("SELECT COUNT(*) c FROM note_file").fetchone()["c"]
-    manual_count = conn.execute("SELECT COUNT(*) c FROM manual WHERE status='ready'").fetchone()["c"]
+    # 手册数只统计知识库范围内的 PDF（「数据库索引位置」内），手册页的浏览目录不计入
+    manual_count = sum(
+        1
+        for r in conn.execute("SELECT path FROM manual WHERE status='ready'").fetchall()
+        if pdf_scan.in_kb_roots(conn, Path(r["path"]))
+    )
     row = conn.execute("SELECT DISTINCT model_id, dim FROM chunk LIMIT 1").fetchone()
 
     by_status = {"ready": 0, "pending": 0, "failed": 0, "excluded": 0, "unindexed": 0}

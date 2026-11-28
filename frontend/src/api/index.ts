@@ -19,6 +19,8 @@ export interface Brand {
 
 export const configApi = {
   getAll: () => http.get<Record<string, any>>('/api/config'),
+  /** 弹出本机「选择文件夹」对话框；cancelled=true 表示用户取消 */
+  pickFolder: () => http.post<{ path: string; cancelled: boolean }>('/api/system/pick-folder', {}),
   save: (patch: Record<string, any>) => http.put<{ saved: string[] }>('/api/config', patch),
   brands: () => http.get<Brand[]>('/api/brands'),
   addBrand: (name: string) => http.post<Brand>('/api/brands', { name }),
@@ -34,6 +36,23 @@ export const configApi = {
       '/api/config/test-embedding',
       body,
     ),
+  /** 程序数据库文件（workbench.db）存放目录；与「数据库索引位置」无关，切换后需重启 */
+  dbLocation: () =>
+    http.get<{
+      dir: string
+      active_dir: string
+      db_file: string
+      default_dir: string
+      restart_required: boolean
+    }>('/api/system/db-location'),
+  saveDbLocation: (dir: string) =>
+    http.put<{
+      ok: boolean
+      dir: string
+      active_dir: string
+      db_file: string
+      restart_required: boolean
+    }>('/api/system/db-location', { dir }),
 }
 
 export const dashboardApi = {
@@ -45,7 +64,9 @@ export const dashboardApi = {
       follow_up_count: number
       month_new_count: number
       avg_handle_days: number | null
-      customer_top: { customer: string; total: number; open: number }[]
+      customer_top: { customer: string; total: number; open: number; last_updated?: string }[]
+      customer_all?: { customer: string; total: number; open: number; last_updated?: string }[]
+      customer_count?: number
       follow_up_days: number
       scanned_at: string | null
     }>('/api/dashboard/summary'),
@@ -62,7 +83,7 @@ export const dashboardApi = {
 export const notesApi = {
   list: (query = '') => http.get<Record<string, any>[]>(`/api/notes${query}`),
   get: (path: string) => http.get<Record<string, any>>(`/api/notes/${encodeURIComponent(path)}`),
-  create: (body: { customer: string; project_name: string; start_date?: string }) =>
+  create: (body: { customer: string; project_name: string; start_date?: string; folder?: string }) =>
     http.post<Record<string, any>>('/api/notes', body),
   save: (
     path: string,
@@ -107,6 +128,15 @@ export const projectsApi = {
   list: (query = '') => http.get<Record<string, any>[]>(`/api/projects${query}`),
   patchStatus: (path: string, status: 'active' | 'archived') =>
     http.patch<Record<string, any>>(`/api/projects/${encodeURIComponent(path)}`, { status }),
+}
+
+/** ---------------- 随手笔记（「1」顶栏入口，M2 扩展） ---------------- */
+
+export const memosApi = {
+  list: (keyword = '') =>
+    http.get<Record<string, any>[]>(`/api/memos${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ''}`),
+  create: (body: { title: string; body: string; folder: string }) =>
+    http.post<Record<string, any>>('/api/memos', body),
 }
 
 export interface RagCitation {
@@ -364,6 +394,8 @@ export interface PdfManual {
   pages: number | null
   size: number | null
   status: PdfStatus
+  /** kb=在「数据库索引位置」内可入库；manual=仅手册页浏览 */
+  scope: 'kb' | 'manual'
   progress: number | null
   chunks: number
   error: string | null
@@ -375,10 +407,12 @@ export interface PdfManual {
 
 export interface PdfTree {
   root: string
+  roots: string[]
   groups: { name: string; items: PdfManual[] }[]
   total: number
   brands: string[]
   counts: Record<string, number>
+  scope: 'all' | 'kb'
   scan: { added: number; updated: number; invalid: number; removed: number; total: number }
 }
 
@@ -408,18 +442,23 @@ export interface IngestTask {
 }
 
 export const pdfApi = {
-  /** 目录树（后端顺带做一次增量同步） */
-  tree: () => http.get<PdfTree>('/api/pdf/tree'),
-  rescan: () =>
+  /** 目录树（后端顺带做一次增量同步）；scope='kb' 只返回知识库资料目录内的 PDF */
+  tree: (scope?: 'kb') =>
+    http.get<PdfTree>(`/api/pdf/tree${scope ? `?scope=${scope}` : ''}`),
+  rescan: (scope?: 'kb') =>
     http.post<{ added: number; updated: number; invalid: number; removed: number; total: number }>(
-      '/api/pdf/rescan',
+      `/api/pdf/rescan${scope ? `?scope=${scope}` : ''}`,
     ),
   search: (query = '') => http.get<PdfManual[]>(`/api/pdf/search${query}`),
   ingest: (manualIds?: number[], action: 'ingest' | 'rebuild' = 'ingest') =>
-    http.post<{ started: boolean; queued: number[]; skipped: number[]; pending: number; reason?: string }>(
-      '/api/manuals/ingest',
-      { manual_ids: manualIds, action },
-    ),
+    http.post<{
+      started: boolean
+      queued: number[]
+      skipped: number[]
+      skipped_outside?: number[]
+      pending: number
+      reason?: string
+    }>('/api/manuals/ingest', { manual_ids: manualIds, action }),
   rebuild: (manualId: number) =>
     http.post<{ started: boolean; queued: number[] }>(`/api/manuals/${manualId}/rebuild`),
   remove: (manualId: number) =>

@@ -23,4 +23,6 @@ def _fresh_db():
 
     for suffix in ("", "-wal", "-shm"):
         Path(str(paths.DB_PATH) + suffix).unlink(missing_ok=True)
+    # 实例级配置（数据库存放位置等）也必须逐测试重置，否则上一个测试切换的库位置会污染后续用例
+    paths.INSTANCE_FILE.unlink(missing_ok=True)
     yield

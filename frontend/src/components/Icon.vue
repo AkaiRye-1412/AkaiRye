@@ -8,6 +8,7 @@ const props = withDefaults(defineProps<{ name: string; size?: number }>(), { siz
 const PATHS: Record<string, string> = {
   home: '<path d="M3 10.8 12 3l9 7.8"/><path d="M5 9.5V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.5"/><path d="M9.5 21v-6h5v6"/>',
   notes: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/>',
+  memo: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   book: '<path d="M12 5.5C10.5 4 8.5 3.5 5 3.5c-1 0-1.5.5-1.5 1.5v12c0 1 .5 1.5 1.5 1.5 3.5 0 5.5.5 7 2 1.5-1.5 3.5-2 7-2 1 0 1.5-.5 1.5-1.5V5c0-1-.5-1.5-1.5-1.5-3.5 0-5.5.5-7 2z"/><path d="M12 5.5v14"/>',
   terminal: '<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7 9.5 3 2.8-3 2.8"/><path d="M12.5 15.2h4.5"/>',
   git: '<circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 8.2v7.6"/><path d="M8.2 6h2.6a4 4 0 0 1 4 4v.2"/><path d="M18 11.2v1.6a4 4 0 0 1-4 4H8.2"/>',

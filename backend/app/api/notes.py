@@ -42,14 +42,19 @@ def list_notes(
     indexed_status: str | None = Query(None),
     conn: Connection = Depends(get_db),
 ) -> list[dict]:
-    """笔记列表（字段即 note_file 列；先增量重扫保证与磁盘一致）。
+    """售后笔记列表（字段即 note_file 列；先增量重扫保证与磁盘一致）。
 
-    外部知识库白名单目录的笔记（绝对路径主键）不属于售后笔记，不在此列表。
+    仅返回售后笔记：排除 note_type='memo'（随手记）与 'kb'（知识库资料目录），
+    且路径必须落在「售后笔记索引位置」（最多 3 个）的某个根内。
+    外部知识库白名单目录的笔记不进此列表。
     """
     vault.rescan_all(conn)
-    from pathlib import Path
 
-    sql = "SELECT * FROM note_file WHERE 1=1"
+    roots = vault.after_sales_roots(conn)
+    sql = (
+        "SELECT * FROM note_file"
+        " WHERE COALESCE(note_type,'after_sales') NOT IN ('memo','kb')"
+    )
     params: list = []
     if customer:
         sql += " AND customer = ?"
@@ -68,23 +73,40 @@ def list_notes(
         params.append(indexed_status)
     sql += " ORDER BY updated_date DESC, path"
     rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-    return [r for r in rows if not Path(r["path"]).is_absolute()]
+    out: list[dict] = []
+    for r in rows:
+        if not vault.path_in_roots(r["path"], roots):
+            continue
+        out.append(r)
+    return out
 
 
 class CreateNoteBody(BaseModel):
     customer: str = Field(min_length=1)
     project_name: str = Field(min_length=1)
     start_date: str | None = None  # YYYY-MM-DD，缺省取今天
+    folder: str | None = None  # vault 内相对子目录；缺省写售后目录，指定则写自定义目录（随手笔记）
 
 
 @router.post("", status_code=201)
 def create_note(body: CreateNoteBody, conn: Connection = Depends(get_db)) -> dict:
-    """FR-NOTE-02/08/10：按命名规范落 vault，重名 409 path_conflict。"""
+    """FR-NOTE-02/08/10：按命名规范落 vault，重名 409 path_conflict。
+
+    folder（可选）：自定义存放位置（vault 内相对目录），用于随手笔记等非售后场景。
+    """
     start = body.start_date or date.today().isoformat()
     try:
-        return vault.create_note(conn, body.customer.strip(), body.project_name.strip(), start)
+        return vault.create_note(
+            conn,
+            body.customer.strip(),
+            body.project_name.strip(),
+            start,
+            (body.folder or "").strip() or None,
+        )
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail={"code": "path_conflict", "message": "同名笔记已存在（一项目一笔记）"}) from exc
+    except vault.PathOutsideRoot as exc:
+        raise HTTPException(status_code=400, detail={"code": "path_outside_root", "message": "存放位置越出 vault 根目录"}) from exc
     except (NotADirectoryError, FileNotFoundError) as exc:
         raise _map_common(exc, "vault_not_configured") from exc
 

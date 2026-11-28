@@ -85,18 +85,31 @@ def _model_id(cfg: dict) -> str:
 
 
 def _in_whitelist(conn, rel: str) -> bool:
-    """范围判定（2026-11-26 扩展）：
-    - 售后文件夹根下的文件恒在（用户日期命名售后卡形态）；
+    """范围判定：
+    - 售后主位置根下的直接子文件恒在（子目录仍需显式白名单，避免 vault 杂乱目录全被索引）；
+    - 售后第 2/3 个位置、随手笔记各位置、知识库资料目录（「数据库索引位置」）：整根递归都在范围内；
     - 其余按归一化白名单目录前缀匹配（子文件夹名 / vault 相对路径 / 绝对路径均可）。
+    - PDF 手册目录不在知识库范围内（仅用于手册界面浏览/预览）。
     """
     p = Path(rel)
-    if not p.is_absolute():
+    if p.is_absolute():
+        abs_p = p.resolve()
+    else:
         base = vault.notes_dir(conn)
         abs_p = (base / rel).resolve()
         if abs_p.parent == base:
             return True
-    else:
-        abs_p = p.resolve()
+
+    for root in [
+        *vault.after_sales_roots(conn)[1:],
+        *vault.memo_roots(conn),
+        *vault.db_roots(conn),
+    ]:
+        try:
+            if abs_p.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
     for _key, abs_dir in vault.whitelist_abs_dirs(conn):
         if abs_p == abs_dir or abs_p.is_relative_to(abs_dir):
             return True

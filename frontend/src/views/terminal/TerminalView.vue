@@ -6,7 +6,7 @@
  * - 每标签一条 WS（/ws/terminal/{tab_id}），PTY 进程随标签常驻（后端），刷新/重连后 attach 回同一进程；
  * - 标签元数据（cwd/标题）持久化后端 terminal_tab 表，进入页面时 REST 全量对账；
  * - 内置命令（FR-TERM-02）：以 / 开头走后端拦截，回显 builtin 帧；
- * - 关闭运行中标签二次确认（FR-TERM-07）：DELETE 带 force（前端先 confirm）。
+ * - 关闭标签直接关闭、不再二次确认：DELETE 带 force，后端直接终止该标签的 PTY。
  */
 import { computed, onBeforeUnmount, onMounted, ref, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
@@ -40,8 +40,6 @@ const activeId = ref<string | null>(null)
 const loading = ref(true)
 // 每个标签的 DOM 容器（tab_id → element）
 const hostEls = new Map<string, HTMLElement>()
-// 关闭确认弹窗：用自定义 UI 替代 window.confirm（webview 中 confirm 可能被禁用/静默返回 false）
-const confirmTarget = ref<TabRuntime | null>(null)
 
 const active = computed(() => tabs.value.find((t) => t.tab.tab_id === activeId.value) ?? null)
 
@@ -276,11 +274,7 @@ async function newTab(cwd?: string, silent = false) {
 }
 
 function closeTab(rt: TabRuntime) {
-  // 运行中标签先弹自定义确认框（避免 window.confirm 在 webview 中不可靠）
-  if (rt.alive) {
-    confirmTarget.value = rt
-    return
-  }
+  // 直接关闭，不弹确认：force=1 让后端终止标签内的 PTY 进程
   doClose(rt)
 }
 
@@ -306,16 +300,6 @@ async function doClose(rt: TabRuntime) {
     activeId.value = next ? next.tab.tab_id : null
     if (next) activate(next)
   }
-}
-
-function confirmClose() {
-  const rt = confirmTarget.value
-  confirmTarget.value = null
-  if (rt) doClose(rt)
-}
-
-function cancelClose() {
-  confirmTarget.value = null
 }
 
 function onHostMounted(tabId: string, el: unknown) {
@@ -426,20 +410,6 @@ function onResize() {
         class="term-host"
         :class="{ hidden: rt.tab.tab_id !== activeId }"
       />
-    </div>
-
-    <!-- 关闭确认弹窗（自定义，替代 window.confirm） -->
-    <div v-if="confirmTarget" class="confirm-overlay" @click.self="cancelClose">
-      <div class="confirm-dialog">
-        <div class="confirm-title">关闭终端标签</div>
-        <div class="confirm-body">
-          标签「{{ confirmTarget.tab.title }}」中仍有进程在运行，关闭将终止该进程。
-        </div>
-        <div class="confirm-actions">
-          <button class="btn-cancel" @click="cancelClose">取消</button>
-          <button class="btn-confirm" @click="confirmClose">确定关闭</button>
-        </div>
-      </div>
     </div>
   </div>
 </template>
@@ -574,58 +544,4 @@ function onResize() {
   color: #8b8880;
   margin-bottom: 5px;
 }
-
-/* 关闭确认弹窗 */
-.confirm-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  display: grid;
-  place-items: center;
-  z-index: 1000;
-}
-.confirm-dialog {
-  width: 360px;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.24);
-  padding: 20px;
-  color: var(--ink);
-}
-.confirm-title {
-  font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-.confirm-body {
-  font-size: 13px;
-  color: var(--ink-2);
-  line-height: 1.6;
-  margin-bottom: 18px;
-}
-.confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.btn-cancel,
-.btn-confirm {
-  height: 32px;
-  padding: 0 16px;
-  border-radius: 7px;
-  font-size: 13px;
-  cursor: pointer;
-  border: 1px solid var(--line);
-}
-.btn-cancel {
-  background: #fff;
-  color: var(--ink-2);
-}
-.btn-cancel:hover { background: #f5f4ef; }
-.btn-confirm {
-  background: #c0392b;
-  color: #fff;
-  border-color: #c0392b;
-}
-.btn-confirm:hover { background: #a93226; }
 </style>

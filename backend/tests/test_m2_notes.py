@@ -293,3 +293,102 @@ def test_delete_note_missing_and_outside(client):
     # 编码后的 ../ 才能到达路由（httpx 会先归一化裸路径），越界由 safe_rel_path 拦下
     outside = c.delete("/api/notes/..%2F..%2Fetc%2Fpasswd.md")
     assert outside.status_code in (400, 404)
+
+
+def test_create_note_in_custom_folder(client):
+    """随手笔记扩展：folder 指定 vault 内自定义子目录，笔记写入该目录并出现在列表。"""
+    c, notes_dir = client
+    # 无斜杠条目 = 售后目录下的子目录（相对路径主键，直接进售后列表）
+    resp = c.post(
+        "/api/notes",
+        json={"customer": "随手记", "project_name": "会议纪要", "folder": "随手笔记"},
+    )
+    assert resp.status_code == 201
+    row = resp.json()
+    assert row["path"] == "随手笔记/随手记-会议纪要.md"
+
+    # 文件确实落在 vault_root/客户售后问题/随手笔记/ 下
+    target = notes_dir / "随手笔记" / "随手记-会议纪要.md"
+    assert target.exists()
+    assert target.read_text(encoding="utf-8").startswith("---\nname: 随手记\n")
+
+    # 出现在售后笔记列表（售后目录内的笔记都属于「我的笔记」）
+    paths = {n["path"] for n in c.get("/api/notes").json()}
+    assert row["path"] in paths
+
+    # 含斜杠条目 = vault 根下相对路径（绝对路径主键，走外部知识库白名单）
+    resp2 = c.post(
+        "/api/notes",
+        json={"customer": "随手记", "project_name": "灵感", "folder": "日常/灵感"},
+    )
+    assert resp2.status_code == 201
+    row2 = resp2.json()
+    assert row2["path"].endswith("日常/灵感/随手记-灵感.md")
+    # 该 vault 内目录已被自动纳入白名单
+    wl = c.get("/api/kb/whitelist").json()
+    assert "日常/灵感" in wl["folders"]
+    # 不在「售后笔记索引位置」内的笔记不进售后列表（只做知识库索引）
+    paths2 = {n["path"] for n in c.get("/api/notes").json()}
+    assert row2["path"] not in paths2
+
+    # 越界：vault 之外的绝对目录被拦截
+    bad = c.post("/api/notes", json={"customer": "X", "project_name": "Y", "folder": "../逃逸目录"})
+    assert bad.status_code == 400
+
+
+def test_create_memo_anywhere(client):
+    """随手笔记：写到电脑任意绝对路径（不受 vault_root 限制），独立列表，不污染售后列表。"""
+    import shutil
+    import tempfile
+
+    c, _ = client
+    memo_dir = Path(tempfile.mkdtemp(prefix="wb_test_memo_")).resolve()
+
+    # 创建随手记到 vault 之外的任意目录
+    resp = c.post("/api/memos", json={"title": "会议要点", "body": "今天讨论了 A 方案", "folder": str(memo_dir)})
+    assert resp.status_code == 201, resp.text
+    row = resp.json()
+    assert row["note_type"] == "memo"
+    assert Path(row["path"]).parent == memo_dir
+
+    # 文件确实落到该目录，简单格式（含 note_type: memo 标记）
+    target = Path(row["path"])
+    assert target.exists()
+    content = target.read_text(encoding="utf-8")
+    assert content.startswith("---\nnote_type: memo\n---")
+    assert "# 会议要点" in content
+    assert "今天讨论了 A 方案" in content
+
+    # 出现在随手笔记列表
+    memo_paths = {m["path"] for m in c.get("/api/memos").json()}
+    assert row["path"] in memo_paths
+
+    # 不出现在售后笔记列表
+    notes_paths = {n["path"] for n in c.get("/api/notes").json()}
+    assert row["path"] not in notes_paths
+
+    # 能读取（复用 /api/notes/{path} 的 path-based 接口）
+    get_resp = c.get(f"/api/notes/{row['path']}")
+    assert get_resp.status_code == 200
+
+    # 删除（软删除到 vault .trash）
+    del_resp = c.delete(f"/api/notes/{row['path']}")
+    assert del_resp.status_code == 200
+
+    # 目录已被自动纳入白名单
+    wl = c.get("/api/kb/whitelist").json()
+    assert memo_dir.as_posix() in wl["folders"]
+
+    shutil.rmtree(memo_dir, ignore_errors=True)
+
+
+def test_create_memo_requires_folder(client):
+    """随手笔记：folder 省略时写「随手笔记索引位置」的第 1 个（主位置）。"""
+    c, _ = client
+    resp = c.post("/api/memos", json={"title": "无目录随手记", "body": "正文"})
+    assert resp.status_code == 201, resp.text
+    row = resp.json()
+    assert row["note_type"] == "memo"
+    assert Path(row["path"]).name.startswith("无目录随手记")
+    # 默认主位置 = vault_root/随手笔记
+    assert "随手笔记" in Path(row["path"]).as_posix()

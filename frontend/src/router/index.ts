@@ -9,6 +9,7 @@ const router = createRouter({
   routes: [
     { path: '/', name: 'home', component: () => import('@/views/home/HomeView.vue'), meta: { module: 'M1' } },
     { path: '/notes', name: 'notes', component: () => import('@/views/notes/NotesView.vue'), meta: { module: 'M2' } },
+    { path: '/memos', name: 'memos', component: () => import('@/views/memos/MemosView.vue'), meta: { module: 'M2' } },
     { path: '/kb', name: 'kb', component: () => import('@/views/kb/KnowledgeBaseView.vue'), meta: { module: 'M3' } },
     { path: '/pdf', name: 'pdf', component: () => import('@/views/pdf/PdfManualView.vue'), meta: { module: 'M9' } },
     { path: '/terminal', name: 'terminal', component: () => import('@/views/terminal/TerminalView.vue'), meta: { module: 'M5', phase: 3 } },

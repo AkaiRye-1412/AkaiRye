@@ -111,13 +111,19 @@ def tags_of(fields: dict[str, str]) -> list[str]:
     return out
 
 
-def extract_title(fields: dict[str, str], body: str, stem: str) -> str:
-    """列表标题：正文首个 H1 → 头部 title（去掉纯日期占位）→ 文件名。"""
+def extract_title(fields: dict[str, str], body: str, stem: str, prefer_field: bool = False) -> str:
+    """列表标题：正文首个 H1 → 头部 title（去掉纯日期占位）→ 文件名。
+
+    随手笔记（prefer_field=True）以头部 title 为准：标题可在界面上直接改，
+    改的就是 frontmatter 的 title，列表必须跟着变；没有 title 才回退 H1 / 文件名。
+    """
+    raw_title = (fields.get("title") or "").strip()
+    if prefer_field and raw_title and not _DATE_IN_NAME_RE.match(raw_title.replace("-", "")):
+        return raw_title
     for line in body.splitlines():
         m = _H1_RE.match(line.strip())
         if m:
             return m.group(1).strip()
-    raw_title = (fields.get("title") or "").strip()
     if raw_title and not _DATE_IN_NAME_RE.match(raw_title.replace("-", "")):
         return raw_title
     return stem
@@ -191,7 +197,10 @@ def touch_updated(text: str, today: str) -> str:
 
     def _sub(m: re.Match) -> str:
         block = re.sub(r"(?m)^updated:.*$", f"updated: {today}", m.group(1))
-        return f"---\n{block}\n---\n"
+        # 闭合 --- 之后的空白（原作者习惯的空行）原样带回，否则每次保存都把空行吃掉
+        matched = m.group(0)
+        tail = matched[matched.rindex("---") + 3:] or "\n"
+        return f"---\n{block}\n---{tail}"
 
     return _FRONTMATTER_RE.sub(_sub, text, count=1) if _FRONTMATTER_RE.match(text) else text
 
@@ -250,17 +259,83 @@ def new_note_template(customer: str, project_name: str, start_date: str) -> str:
     return serialize_frontmatter(fields, body)
 
 
+def new_memo_template(title: str, body: str) -> str:
+    """随手笔记（「1」顶栏入口）的简单格式：极简 frontmatter（仅 note_type 标记）+ 标题 + 正文。
+
+    note_type: memo 用于 rescan 时把该文件识别为随手笔记（与售后笔记分离列表）。
+    不套售后卡片固定骨架，正文即用户输入的 Markdown。
+    """
+    text = "---\nnote_type: memo\n---\n\n"
+    text += f"# {title.strip() or '无标题'}\n\n"
+    if body.strip():
+        text += body.strip() + "\n"
+    return text
+
+
 # ---- 路径与哈希 -----------------------------------------------------------
 
 def content_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+MAX_INDEX_ROOTS = 3
+
+
+def _cfg_roots(raw) -> list[str]:
+    """归一化「索引位置」列表：去空、去重、保序，最多 3 个（第 1 个为主位置）。"""
+    out: list[str] = []
+    for x in raw or []:
+        s = str(x).strip()
+        if s and s not in out:
+            out.append(s)
+    return out[:MAX_INDEX_ROOTS]
+
+
+def _as_path(raw: str) -> Path:
+    return Path(raw).expanduser().resolve()
+
+
+def after_sales_roots(conn) -> list[Path]:
+    """售后笔记索引位置（最多 3 个，第 1 个为主位置）。
+
+    未配置时回落旧单值语义 vault_root / notes_folder，保证老配置零迁移。
+    """
+    cfg = config_service.get_raw(conn, "paths")
+    roots = [_as_path(r) for r in _cfg_roots(cfg.get("after_sales_roots"))]
+    if roots:
+        return roots
+    vault = Path(cfg.get("vault_root") or "").expanduser()
+    folder = cfg.get("notes_folder") or "客户售后问题"
+    return [(vault / folder).resolve()]
+
+
+def memo_roots(conn) -> list[Path]:
+    """随手笔记索引位置（最多 3 个，第 1 个为主位置）。
+
+    未配置时回落 vault_root / 随手笔记。
+    """
+    cfg = config_service.get_raw(conn, "paths")
+    roots = [_as_path(r) for r in _cfg_roots(cfg.get("memo_roots"))]
+    if roots:
+        return roots
+    return [(vault_root(conn) / "随手笔记").resolve()]
+
+
+def db_roots(conn) -> list[Path]:
+    """知识库资料目录（「数据库索引位置」，最多 3 个）。
+
+    知识库要解析的资料来源：目录内 Markdown 会被扫描进 note_file（note_type='kb'）
+    并切块/向量化，进检索但不进售后列表与随手记列表。
+    与程序自身的数据库文件位置无关（那个在 data/instance.json 的 db_file_dir）。
+    未配置时为空（不回落任何目录，避免误扫）。
+    """
+    cfg = config_service.get_raw(conn, "paths")
+    return [_as_path(r) for r in _cfg_roots(cfg.get("db_roots"))]
+
+
 def notes_dir(conn) -> Path:
-    paths_cfg = config_service.get_raw(conn, "paths")
-    vault_root = Path(paths_cfg["vault_root"]).expanduser()
-    folder = paths_cfg["notes_folder"] or "客户售后问题"
-    return (vault_root / folder).resolve()
+    """售后笔记主目录（新建笔记默认写入位置）。"""
+    return after_sales_roots(conn)[0]
 
 
 def vault_root(conn) -> Path:
@@ -295,9 +370,41 @@ def whitelist_abs_dirs(conn) -> list[tuple[str, Path]]:
 
 
 def external_whitelist_dirs(conn) -> list[tuple[str, Path]]:
-    """位于售后笔记文件夹之外的白名单目录（需独立扫描/监听的范围）。"""
+    """需独立扫描/监听的范围：售后额外根 + 随手根 + 白名单中不在主售后目录内的目录。
+
+    售后第 2/3 个位置与随手笔记各位置本身也要可读可写，因此这里统一并入，
+    调用方（rescan_all / safe_rel_path / watchdog）无需再单独处理。
+    """
     base = notes_dir(conn)
-    return [(k, d) for k, d in whitelist_abs_dirs(conn) if not d.is_relative_to(base)]
+    out: dict[str, Path] = {}
+    for root in [*after_sales_roots(conn)[1:], *memo_roots(conn)]:
+        if root.is_dir():
+            out.setdefault(root.as_posix(), root)
+    for k, d in whitelist_abs_dirs(conn):
+        if not d.is_relative_to(base):
+            out.setdefault(k, d)
+    return list(out.items())
+
+
+def path_in_roots(rel: str, roots: list[Path]) -> bool:
+    """note_file.path 是否落在给定根目录集合内。
+
+    相对主键只可能来自主售后根，直接视为命中；绝对主键逐一比对（Windows 大小写不敏感）。
+    """
+    p = Path(rel)
+    if not p.is_absolute():
+        return True
+    try:
+        pr = p.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            if pr.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def resolve_note_abs(conn, rel: str) -> Path:
@@ -309,20 +416,54 @@ def resolve_note_abs(conn, rel: str) -> Path:
 
 
 def safe_rel_path(conn, rel: str) -> Path:
-    """路径越界防护（api-rules 第 6 节）：notes_dir 内，或白名单外部目录内。"""
+    """路径越界防护（api-rules 第 6 节）：notes_dir / 外部白名单目录 / 知识库资料目录内。"""
     target = resolve_note_abs(conn, rel).resolve()
     if target.is_relative_to(notes_dir(conn)):
         return target
     for _key, abs_dir in external_whitelist_dirs(conn):
         if target.is_relative_to(abs_dir):
             return target
+    for root in db_roots(conn):
+        try:
+            if target.is_relative_to(root):
+                return target
+        except OSError:
+            continue
     raise PathOutsideRoot(rel)
+
+
+def source_of(conn, abs_path: Path) -> str:
+    """按所在根判断归属：after_sales / memo / kb / ''（其他白名单目录）。
+
+    与 rescan_all 的遍历顺序保持一致（售后 → 随手 → 资料目录），
+    用于 watchdog 单文件同步时给出 note_type 提示，避免把 kb 文档误标成售后。
+    """
+    p = Path(abs_path)
+    try:
+        pr = p.resolve()
+    except OSError:
+        return ""
+    for root, source in (
+        [(r, "after_sales") for r in after_sales_roots(conn)]
+        + [(r, "memo") for r in memo_roots(conn)]
+        + [(r, "kb") for r in db_roots(conn)]
+    ):
+        try:
+            if pr.is_relative_to(root.resolve()):
+                return source
+        except OSError:
+            continue
+    return ""
 
 
 # ---- 扫描同步（note_file 缓存，03 文档场景 1） ----------------------------
 
-def scan_file(conn, abs_path: Path, rel_path: str, now_iso: str) -> dict:
-    """扫描单个 .md → note_file upsert，返回行 dict。"""
+def scan_file(conn, abs_path: Path, rel_path: str, now_iso: str, source: str = "") -> dict:
+    """扫描单个 .md → note_file upsert，返回行 dict。
+
+    source 为目录归属：'after_sales'（售后根）/ 'memo'（随手根）/ 'kb'（知识库资料目录）/
+    ''（其他白名单目录，按 frontmatter 的 note_type 判断，缺省 after_sales）。
+    """
     data = abs_path.read_bytes()
     text = data.decode("utf-8", errors="replace")
     fields, body, head_ok, _missing = parse_frontmatter(text)
@@ -333,6 +474,12 @@ def scan_file(conn, abs_path: Path, rel_path: str, now_iso: str) -> dict:
     except ValueError:
         updated_date = date.fromtimestamp(stat.st_mtime).isoformat()
     tags = tags_of(fields)
+    if source in ("after_sales", "memo", "kb"):
+        note_type = source
+    else:
+        note_type = fields.get("note_type") or "after_sales"
+    if note_type not in ("after_sales", "memo", "kb"):
+        note_type = "after_sales"
     row = {
         "path": rel_path,
         "customer": fields.get("name") or None,
@@ -344,27 +491,28 @@ def scan_file(conn, abs_path: Path, rel_path: str, now_iso: str) -> dict:
         "file_mtime": int(stat.st_mtime),
         "content_hash": content_hash(data),
         "head_ok": 1 if head_ok else 0,
-        "note_title": extract_title(fields, body, abs_path.stem),
+        "note_title": extract_title(fields, body, abs_path.stem, prefer_field=(note_type == "memo")),
         "summary": fields.get("description") or extract_summary(body),
         "tags": ", ".join(tags),
         "note_mode": "project" if is_project_note(fields) else "card",
+        "note_type": note_type,
         "scanned_at": now_iso,
     }
     conn.execute(
         """
         INSERT INTO note_file (path, customer, project_name, status, start_date, updated_date,
                                file_mtime, content_hash, head_ok, note_title, summary, tags,
-                               note_mode, scanned_at)
+                               note_mode, note_type, scanned_at)
         VALUES (:path, :customer, :project_name, :status, :start_date, :updated_date,
                 :file_mtime, :content_hash, :head_ok, :note_title, :summary, :tags,
-                :note_mode, :scanned_at)
+                :note_mode, :note_type, :scanned_at)
         ON CONFLICT(path) DO UPDATE SET
             customer=excluded.customer, project_name=excluded.project_name,
             status=excluded.status, start_date=excluded.start_date,
             updated_date=excluded.updated_date, file_mtime=excluded.file_mtime,
             content_hash=excluded.content_hash, head_ok=excluded.head_ok,
             note_title=excluded.note_title, summary=excluded.summary, tags=excluded.tags,
-            note_mode=excluded.note_mode, scanned_at=excluded.scanned_at
+            note_mode=excluded.note_mode, note_type=excluded.note_type, scanned_at=excluded.scanned_at
         """,
         row,
     )
@@ -379,26 +527,63 @@ def rescan_all(conn) -> int:
     """
     from datetime import datetime, timezone
 
-    base = notes_dir(conn)
+    primary = notes_dir(conn)
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     seen: set[str] = set()
+    seen_abs: set[str] = set()
     count = 0
 
-    jobs: list[tuple[Path, Path]] = []  # (abs_path, rel_key)
-    if base.is_dir():
-        for abs_path in sorted(base.rglob("*.md")):
+    jobs: list[tuple[Path, str, str]] = []  # (abs_path, rel_key, source)
+    covered: list[Path] = []
+
+    # 售后多根：主根用相对主键（列表按相对路径展示），其余根用绝对主键
+    for root in after_sales_roots(conn):
+        if not root.is_dir():
+            continue
+        covered.append(root)
+        for abs_path in sorted(root.rglob("*.md")):
             if abs_path.is_file():
-                jobs.append((abs_path, abs_path.relative_to(base).as_posix()))
+                key = (
+                    abs_path.relative_to(root).as_posix()
+                    if root == primary
+                    else abs_path.as_posix()
+                )
+                jobs.append((abs_path, key, "after_sales"))
+
+    # 随手多根：绝对主键
+    for root in memo_roots(conn):
+        if not root.is_dir():
+            continue
+        covered.append(root)
+        for abs_path in sorted(root.rglob("*.md")):
+            if abs_path.is_file():
+                jobs.append((abs_path, abs_path.as_posix(), "memo"))
+
+    # 知识库资料目录（「数据库索引位置」）：绝对主键，note_type='kb'（进索引不进售后/随手列表）
+    for root in db_roots(conn):
+        if not root.is_dir():
+            continue
+        covered.append(root)
+        for abs_path in sorted(root.rglob("*.md")):
+            if abs_path.is_file():
+                jobs.append((abs_path, abs_path.as_posix(), "kb"))
+
+    # 其他白名单目录（知识库附加目录）：绝对主键，按 frontmatter 判定是否 memo
     for _key, ext_dir in external_whitelist_dirs(conn):
+        if any(ext_dir == c or ext_dir.is_relative_to(c) for c in covered):
+            continue
+        covered.append(ext_dir)
         for abs_path in sorted(ext_dir.rglob("*.md")):
             if abs_path.is_file():
-                jobs.append((abs_path, abs_path.as_posix()))
+                jobs.append((abs_path, abs_path.as_posix(), ""))
 
-    for abs_path, rel in jobs:
-        if rel in seen:
+    for abs_path, rel, source in jobs:
+        abs_key = abs_path.resolve().as_posix()
+        if rel in seen or abs_key in seen_abs:
             continue
         seen.add(rel)
-        scan_file(conn, abs_path, rel, now_iso)
+        seen_abs.add(abs_key)
+        scan_file(conn, abs_path, rel, now_iso, source)
         count += 1
 
     # 清理已删除文件对应的缓存行（vault 唯一真相源：块三件套随笔记行一并删除）
@@ -436,9 +621,82 @@ def read_note(conn, rel: str) -> dict:
     }
 
 
-def create_note(conn, customer: str, project_name: str, start_date: str) -> dict:
-    """FR-NOTE-02/08/10：一项目一笔记，按命名规范落盘；重名 409 path_conflict（api-rules）。"""
+def _ensure_dir_in_scope(conn, folder: str) -> Path:
+    """把「随手笔记」自定义目录解析为可写目录，语义与 resolve_entry 保持一致：
+
+    - folder 为空 → 默认售后目录 notes_dir；
+    - 不含 `/` 的条目 → 售后目录下的子目录（相对路径主键，直接进售后列表）；
+    - 含 `/` 的条目 → vault 根下的相对路径（绝对路径主键，走外部白名单）；
+    - 绝对路径条目 → 仅当仍在 vault_root 之内才允许。
+    目录不存在时按需创建；越界抛 PathOutsideRoot。
+    """
     base = notes_dir(conn)
+    if not folder or not folder.strip():
+        return base
+    rel_dir = folder.strip().replace("\\", "/").strip("/")
+    p = Path(rel_dir)
+    if p.is_absolute():
+        # 允许绝对路径，但必须在 vault_root 内
+        target = p.resolve()
+        if not target.is_relative_to(vault_root(conn)):
+            raise PathOutsideRoot(rel_dir)
+    elif "/" in rel_dir:
+        target = (vault_root(conn) / rel_dir).resolve()
+        if not target.is_relative_to(vault_root(conn)):
+            raise PathOutsideRoot(rel_dir)
+    else:
+        target = (base / rel_dir).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    _ensure_whitelisted(conn, rel_dir)
+    return target
+
+
+def _ensure_whitelisted(conn, rel_dir: str) -> None:
+    """目录不在 notes_dir/白名单内时，把它追加进 index.whitelist（保持幂等、去重）。
+
+    仅对「vault 根下、售后目录之外」的目录（含 `/` 的相对路径或 vault 内绝对路径）
+    才需要白名单；售后目录内的子目录无需白名单（rescan 天然扫描 notes_dir 全量 rglob）。
+    """
+    base = notes_dir(conn)
+    root = vault_root(conn)
+    p = Path(rel_dir)
+    if p.is_absolute():
+        # vault 内绝对路径 → 转成相对 vault_root 的 posix 形式存白名单
+        try:
+            posix_dir = p.resolve().relative_to(root).as_posix()
+        except ValueError:
+            return
+        abs_dir = p.resolve()
+    elif "/" in rel_dir:
+        # 含斜杠 = vault 根下相对路径
+        posix_dir = p.as_posix()
+        abs_dir = (root / rel_dir).resolve()
+    else:
+        # 无斜杠 = 售后目录子目录，无需白名单
+        return
+    # 已落在售后目录内 → 无需白名单
+    if abs_dir.is_relative_to(base):
+        return
+    folders = config_service.get_raw(conn, "index.whitelist").get("folders") or []
+    if posix_dir in folders:
+        return
+    folders = [*folders, posix_dir]
+    config_service.save_many(conn, {"index.whitelist": {"folders": folders}})
+
+
+def create_note(
+    conn,
+    customer: str,
+    project_name: str,
+    start_date: str,
+    folder: str | None = None,
+) -> dict:
+    """FR-NOTE-02/08/10：一项目一笔记，按命名规范落盘；重名 409 path_conflict（api-rules）。
+
+    folder（可选，随手笔记扩展）：vault 内的相对子目录。缺省写售后目录 notes_dir；
+    指定后写到该自定义目录，并自动纳入白名单/扫描范围，实现「可自定义存放位置」。
+    """
+    base = _ensure_dir_in_scope(conn, folder or "")
     if not base.is_dir():
         raise NotADirectoryError(str(base))
     rel = f"{customer}-{project_name}.md"
@@ -449,10 +707,81 @@ def create_note(conn, customer: str, project_name: str, start_date: str) -> dict
     _write_text(target, text)
     from datetime import datetime, timezone
 
-    row = scan_file(conn, target, rel, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    # 主键口径与 rescan_all 保持一致：
+    # - 售后目录内 → 相对 notes_dir 的相对路径；
+    # - 自定义目录（vault 内 / 白名单）→ 绝对 posix 路径（rescan 通过 external_whitelist_dirs 扫出）。
+    try:
+        rel_key = target.relative_to(notes_dir(conn)).as_posix()
+    except ValueError:
+        rel_key = target.as_posix()
+    row = scan_file(
+        conn, target, rel_key, datetime.now(timezone.utc).isoformat(timespec="seconds"), "after_sales"
+    )
     conn.commit()
-    broker.publish("note.changed", {"path": rel, "change": "created",
+    broker.publish("note.changed", {"path": rel_key, "change": "created",
                                     "customer": customer, "project": project_name})
+    return row
+
+
+def _ensure_memo_dir_whitelisted(conn, abs_dir: Path) -> None:
+    """把随手笔记所在目录（任意绝对路径，不受 vault_root 限制）加入 index.whitelist。
+
+    复用既有白名单机制：whitelist_abs_dirs / external_whitelist_dirs 会把它纳入
+    rescan_all 扫描与 safe_rel_path 读写范围，从而 read/save/delete 全程可用。
+    存白名单的键是该目录的绝对 posix 路径（resolve_entry 对绝对路径直接 resolve）。
+    """
+    key = abs_dir.resolve().as_posix()
+    folders = config_service.get_raw(conn, "index.whitelist").get("folders") or []
+    if key in folders:
+        return
+    config_service.save_many(conn, {"index.whitelist": {"folders": [*folders, key]}})
+
+
+def create_memo(conn, title: str, body: str, folder: str) -> dict:
+    """随手笔记（「1」顶栏入口）：写到电脑任意绝对路径，简单格式，独立列表。
+
+    - folder：完整绝对路径目录（如 D:/我的笔记），不受 vault_root 限制；
+    - 文件名按标题生成并做安全化处理（去掉非法字符），重名自动加序号避免覆盖；
+    - 主键用绝对 posix 路径（与外部白名单目录口径一致），note_type=memo；
+    - 目录自动加入白名单，rescan / 读写 / 索引全程复用既有机制。
+    """
+    from datetime import datetime, timezone
+
+    if not folder or not folder.strip():
+        # 未指定 → 写「随手笔记索引位置」的第 1 个（主位置）
+        abs_dir = memo_roots(conn)[0]
+    else:
+        abs_dir = Path(folder.strip()).expanduser().resolve()
+    abs_dir.mkdir(parents=True, exist_ok=True)
+    if not abs_dir.is_dir():
+        raise NotADirectoryError(str(abs_dir))
+
+    # 文件名安全化：去掉 Windows/跨平台非法字符，空格转下划线，留空回退「未命名」
+    stem = re.sub(r'[\\/:*?"<>|\r\n]+', "-", title.strip())
+    stem = stem.strip(" .") or "未命名"
+    stem = stem.replace(" ", "_")
+
+    target = abs_dir / f"{stem}.md"
+    n = 1
+    while target.exists():
+        target = abs_dir / f"{stem}_{n}.md"
+        n += 1
+
+    text = new_memo_template(title, body)
+    _write_text(target, text)
+
+    _ensure_memo_dir_whitelisted(conn, abs_dir)
+
+    # 主键口径与 rescan_all 保持一致（售后目录内相对路径，其余绝对 posix 路径）
+    try:
+        rel_key = target.relative_to(notes_dir(conn)).as_posix()
+    except ValueError:
+        rel_key = target.as_posix()
+    row = scan_file(
+        conn, target, rel_key, datetime.now(timezone.utc).isoformat(timespec="seconds"), "memo"
+    )
+    conn.commit()
+    broker.publish("note.changed", {"path": rel_key, "change": "created", "customer": None, "project": title})
     return row
 
 
@@ -473,7 +802,9 @@ def save_note(conn, rel: str, content: str, base_hash: str | None, force: bool) 
     today = date.today().isoformat()
     text = touch_updated(content, today)
     _write_text(target, text)
-    row = scan_file(conn, target, rel, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    row = scan_file(conn, target, rel,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    source_of(conn, target))
     conn.commit()
     broker.publish("note.changed", {"path": rel, "change": "modified",
                                     "customer": row["customer"], "project": row["project_name"]})
@@ -522,7 +853,9 @@ def set_status(conn, rel: str, status: str) -> dict:
     text = target.read_text(encoding="utf-8")
     text = _apply_head_updates(text, {"status": STATUS_TO_YAML[status]})
     _write_text(target, text)
-    row = scan_file(conn, target, rel, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    row = scan_file(conn, target, rel,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    source_of(conn, target))
     conn.commit()
     broker.publish("note.changed", {"path": rel, "change": "modified",
                                     "customer": row["customer"], "project": row["project_name"]})
@@ -575,7 +908,9 @@ def update_meta(
 
     patch.setdefault("updated", date.today().isoformat())
     _write_text(target, _apply_head_updates(text, patch))
-    row = scan_file(conn, target, rel, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    row = scan_file(conn, target, rel,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    source_of(conn, target))
     conn.commit()
     broker.publish("note.changed", {"path": rel, "change": "modified",
                                     "customer": row["customer"], "project": row["project_name"]})
@@ -678,7 +1013,8 @@ class VaultService:
                 if prev is not None and prev["content_hash"] == new_hash:
                     return  # R6：hash 去重，误触发（编辑器原子写等）不计变更
                 scan_file(conn, abs_path, rel,
-                          datetime.now(timezone.utc).isoformat(timespec="seconds"))
+                          datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          source_of(conn, abs_path))
                 conn.commit()
                 fields, _, _, _ = parse_frontmatter(data.decode("utf-8", errors="replace"))
                 broker.publish("note.changed", {
@@ -724,6 +1060,8 @@ class VaultService:
         try:
             base = notes_dir(conn)
             ext_dirs = [d for _k, d in external_whitelist_dirs(conn)]
+            # 知识库资料目录也监听：外部编辑后自动重扫 + 增量索引
+            ext_dirs += [r for r in db_roots(conn) if r.is_dir()]
         finally:
             conn.close()
         if not base.is_dir():

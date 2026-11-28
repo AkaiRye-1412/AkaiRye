@@ -169,7 +169,7 @@ onBeforeUnmount(() => {
         <div class="rp-hero-title">
           <span class="rp-hero-ic"><Icon name="git" :size="17" /></span>
           <div class="rp-hero-text">
-            <h1>代码仓库</h1>
+            <h1>项目开发</h1>
             <p>只读展示本地 Git 仓库状态 · 写操作走终端</p>
           </div>
         </div>
@@ -191,11 +191,11 @@ onBeforeUnmount(() => {
     <section v-if="loadError" class="card rp-empty">
       <div class="empty-block">
         <span class="empty-ic"><Icon name="alert" :size="24" /></span>
-        <p>代码仓库暂时不可用</p>
+        <p>项目开发暂时不可用</p>
         <span class="empty-sub">{{ loadError }}</span>
         <div class="rp-empty-actions">
           <button class="btn ghost sm" @click="load">重试</button>
-          <button class="btn ghost sm" @click="openSettings">去设置代码根目录</button>
+          <button class="btn ghost sm" @click="openSettings">去设置项目开发索引位置</button>
         </div>
       </div>
     </section>
@@ -212,9 +212,9 @@ onBeforeUnmount(() => {
     <section v-else-if="!repos.length && !hiddenCount" class="card rp-empty">
       <div class="empty-block">
         <span class="empty-ic"><Icon name="git" :size="24" /></span>
-        <p>还没有发现代码仓库</p>
+        <p>还没有发现项目</p>
         <span class="empty-sub">
-          在「设置 → 代码仓库根目录」里添加 1~3 个目录，这里会自动发现其中的 Git 仓库
+          在「设置 → 项目开发索引位置」里添加 1~3 个目录，这里会自动发现其中的 Git 仓库
         </span>
         <div class="rp-empty-actions">
           <button class="btn ghost sm" :disabled="refreshing" @click="refresh">

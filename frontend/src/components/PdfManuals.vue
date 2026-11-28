@@ -16,10 +16,17 @@ import { useUiStore } from '@/stores/ui'
 import { useRagStore } from '@/stores/rag'
 import Icon from '@/components/Icon.vue'
 
-const props = withDefaults(defineProps<{ compact?: boolean; split?: boolean }>(), {
-  compact: false,
-  split: false,
-})
+const props = withDefaults(
+  defineProps<{ compact?: boolean; split?: boolean; scope?: 'all' | 'kb' }>(),
+  {
+    compact: false,
+    split: false,
+    scope: 'all',
+  },
+)
+
+/** 知识库页用 kb：只列「数据库索引位置」内的 PDF（可入库）；手册页用 all：全部都能浏览 */
+const kbScope = computed(() => props.scope === 'kb')
 
 const ui = useUiStore()
 const rag = useRagStore()
@@ -32,7 +39,6 @@ const rootPath = ref('')
 const loading = ref(false)
 const loadError = ref('')
 const rootMissing = ref(false)
-const keyword = ref('')
 const filter = ref<'' | 'ready' | 'unindexed' | 'processing' | 'error'>('')
 const actingId = ref(0)
 const collapsed = ref<Set<string>>(new Set())
@@ -85,6 +91,8 @@ const all = computed<PdfManual[]>(() => groups.value.flatMap((g) => g.items))
 const counts = computed(() => {
   const c = { '': all.value.length, ready: 0, unindexed: 0, processing: 0, error: 0 }
   for (const m of all.value) {
+    // 仅浏览的 PDF 不算「待入库」，否则手册页会显示一堆永远不会入库的文件
+    if (m.scope === 'manual' && m.status === 'discovered') continue
     const key = GROUP_OF[m.status]
     if (key) c[key] += 1
   }
@@ -92,11 +100,12 @@ const counts = computed(() => {
 })
 
 const filtered = computed(() => {
-  const kw = keyword.value.trim().toLowerCase()
   return all.value.filter((m) => {
-    if (filter.value && GROUP_OF[m.status] !== filter.value) return false
-    if (!kw) return true
-    return [m.name, m.rel_path, m.brand ?? ''].some((v) => v.toLowerCase().includes(kw))
+    if (filter.value) {
+      if (m.scope === 'manual' && m.status === 'discovered') return false
+      if (GROUP_OF[m.status] !== filter.value) return false
+    }
+    return true
   })
 })
 
@@ -108,8 +117,19 @@ const visibleGroups = computed(() => {
 })
 
 const pendingIds = computed(() =>
-  all.value.filter((m) => m.status === 'discovered' || (m.status === 'failed' && !m.chunks)).map((m) => m.id),
+  all.value
+    .filter(
+      (m) =>
+        m.scope === 'kb' &&
+        (m.status === 'discovered' || (m.status === 'failed' && !m.chunks)),
+    )
+    .map((m) => m.id),
 )
+
+/** 是否可入库：只有「数据库索引位置」内的 PDF 才允许（其余仅浏览） */
+function canIngest(m: PdfManual) {
+  return m.scope === 'kb' && (m.status === 'discovered' || (m.status === 'failed' && !m.chunks))
+}
 
 const pct = computed(() => {
   const t = ingest.value.progress || 0
@@ -125,6 +145,10 @@ const STAGE_LABEL: Record<string, string> = {
 }
 
 function statusOf(m: PdfManual) {
+  // 不在知识库资料目录内的 PDF：未入库状态对用户没有意义，直接标「仅浏览」
+  if (m.scope === 'manual' && m.status === 'discovered') {
+    return { label: '仅浏览', cls: 'muted' }
+  }
   return STATUS[m.status] ?? { label: m.status, cls: 'muted' }
 }
 
@@ -147,25 +171,58 @@ const ingestWs = ref<IngestState | null>(null)
 /** 首次进入自动打开第一本；用户主动关过之后就不再替他做决定 */
 const autoOpened = ref(false)
 
-async function refresh(showError = true) {
-  loading.value = true
+/** 列表指纹：轮询/WS 刷新时内容没变就不写回，避免整块列表反复重绘（表现为页面闪烁） */
+function signature(data: { total: number; groups: { name: string; items: PdfManual[] }[] }): string {
+  return (
+    `${data.total}|` +
+    data.groups
+      .map((g) => `${g.name}:${g.items.map((m) => `${m.id}/${m.status}/${m.chunks}`).join(',')}`)
+      .join('|')
+  )
+}
+
+let lastSig = ''
+let refreshing = false
+
+/**
+ * 拉取目录树。
+ *
+ * @param showError 异常是否提示到界面
+ * @param silent    静默刷新（轮询 / WS 事件）：不打 loading 标记 —— 否则列表每 1.8 秒被压暗
+ *                  一次（.pdf-list.loading 的 opacity），看起来就是在不停闪烁。
+ */
+async function refresh(showError = true, silent = false) {
+  if (refreshing) return
+  refreshing = true
+  if (!silent) loading.value = true
   try {
-    const data = await pdfApi.tree()
+    const data = await pdfApi.tree(kbScope.value ? 'kb' : undefined)
     rootPath.value = data.root
-    groups.value = data.groups
-    total.value = data.total
+    const sig = signature(data)
+    if (sig !== lastSig) {
+      lastSig = sig
+      groups.value = data.groups
+      total.value = data.total
+    }
     rootMissing.value = false
     loadError.value = ''
   } catch (e) {
     const err = e as ApiError
     if (err instanceof ApiError && err.code === 'path_invalid') {
       rootMissing.value = true
+      rootPath.value = ''
+      if (total.value || groups.value.length) {
+        groups.value = []
+        total.value = 0
+        lastSig = ''
+      }
       loadError.value = ''
     } else if (showError) {
       loadError.value = err.message
     }
   } finally {
     loading.value = false
+    refreshing = false
   }
   autoOpenFirst()
 }
@@ -173,13 +230,22 @@ async function refresh(showError = true) {
 let pollTimer: number | null = null
 let debounceTimer: number | null = null
 
+let pollTick = 0
+
 function startPolling() {
   if (pollTimer !== null) return
+  pollTick = 0
   pollTimer = window.setInterval(async () => {
     try {
       ingest.value = await pdfApi.state()
-      if (!ingest.value.running) stopPolling()
-      void refresh(false)
+      if (!ingest.value.running) {
+        stopPolling()
+        void refresh(false, true) // 收尾再拉一次，确保状态与块数落到位
+        return
+      }
+      // 进度由 state 轮询驱动；目录树每 2 拍（约 3.6s）扫一次就够，减少无谓重绘
+      pollTick += 1
+      if (pollTick % 2 === 0) void refresh(false, true)
     } catch {
       /* 轮询失败静默，下一轮再试 */
     }
@@ -193,26 +259,32 @@ function stopPolling() {
   }
 }
 
+let lastStage = ''
+
 function onIngestEvent(raw: unknown) {
   const payload = raw as IngestState
-  if (payload && typeof payload.running === 'boolean') {
-    ingest.value = payload
-    ingestWs.value = payload
-    if (payload.running) {
-      justFinished.value = false
-      startPolling()
-    } else {
-      stopPolling()
-      justFinished.value = true
-      window.setTimeout(() => (justFinished.value = false), 2000)
-      if (payload.error) ui.toast('warn', `入库失败：${payload.error}`)
-    }
+  if (!payload || typeof payload.running !== 'boolean') return
+  // 只有「阶段变化」或「运行状态变化」才需要重扫目录；
+  // 纯进度事件（向量化批次）只更新进度条，否则列表会被高频事件反复拉取重绘
+  const stageChanged = payload.stage !== lastStage || payload.running !== ingest.value.running
+  lastStage = payload.stage
+  ingest.value = payload
+  ingestWs.value = payload
+  if (payload.running) {
+    justFinished.value = false
+    startPolling()
+  } else {
+    stopPolling()
+    justFinished.value = true
+    window.setTimeout(() => (justFinished.value = false), 2000)
+    if (payload.error) ui.toast('warn', `入库失败：${payload.error}`)
   }
+  if (!stageChanged) return
   if (debounceTimer !== null) window.clearTimeout(debounceTimer)
   debounceTimer = window.setTimeout(() => {
     debounceTimer = null
-    void refresh(false)
-  }, 700)
+    void refresh(false, true)
+  }, 900)
 }
 
 // ---- 动作 ------------------------------------------------------------------
@@ -220,7 +292,7 @@ function onIngestEvent(raw: unknown) {
 async function rescan() {
   actingId.value = -1
   try {
-    const r = await pdfApi.rescan()
+    const r = await pdfApi.rescan(kbScope.value ? 'kb' : undefined)
     const bits = [
       r.added ? `新增 ${r.added}` : '',
       r.updated ? `更新 ${r.updated}` : '',
@@ -257,6 +329,9 @@ async function ingestAll() {
     const r = await pdfApi.ingest(pendingIds.value.length ? pendingIds.value : undefined)
     if (!r.started && !r.queued.length) ui.toast('info', r.reason || '没有待入库的 PDF')
     else ui.toast('info', `已排入 ${r.queued.length} 本，开始解析入库`)
+    if (r.queued.length && r.skipped_outside?.length) {
+      ui.toast('warn', `${r.skipped_outside.length} 本不在「数据库索引位置」内，已跳过`)
+    }
     await refresh(false)
     startPolling()
   } catch (e) {
@@ -486,7 +561,8 @@ onUnmounted(() => {
 <template>
   <div class="pdf-wrap" :class="{ split: props.split, focused, 'rag-narrow': ragNarrow, peek }">
   <section class="card pdf-card" :class="{ compact: props.compact }">
-    <header class="card-head">
+    <!-- 手册页（双列）只要列表本身：标题、筛选、入库进度都在知识库页才有 -->
+    <header v-if="!props.split" class="card-head">
       <div class="card-title">
         <h2>PDF 手册</h2>
         <span class="count-pill">{{ total }} 本</span>
@@ -496,6 +572,7 @@ onUnmounted(() => {
           <Icon name="refresh" :size="14" /><span>重新扫描</span>
         </button>
         <button
+          v-if="kbScope"
           class="btn primary sm"
           :disabled="rootMissing || !pendingIds.length || actingId !== 0"
           :title="pendingIds.length ? `把 ${pendingIds.length} 本未入库 PDF 排入队列` : '没有待入库的 PDF'"
@@ -517,14 +594,7 @@ onUnmounted(() => {
     </div>
 
     <template v-else>
-      <div class="pdf-toolbar">
-        <div class="search-field">
-          <Icon name="search" :size="15" />
-          <input v-model="keyword" placeholder="搜索手册名、路径或品牌…" autocomplete="off" />
-          <button v-if="keyword" class="search-clear" title="清空" @click="keyword = ''">
-            <Icon name="x" :size="12" />
-          </button>
-        </div>
+      <div v-if="!props.split" class="pdf-toolbar">
         <div class="seg sm">
           <button
             v-for="f in FILTERS"
@@ -538,8 +608,21 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- 知识库页：还没有可入库的 PDF（入库范围由「数据库索引位置」决定） -->
+      <div v-if="kbScope && !total && !loading" class="pdf-hint">
+        <Icon name="database" :size="18" />
+        <div>
+          <strong>知识库还没有可入库的 PDF</strong>
+          <p>
+            只有设置页「数据库索引位置」内的 PDF 才会进知识库；PDF 手册索引位置只用于手册页浏览。
+            把要入库的手册放进该目录后，点「重新扫描」即可。
+          </p>
+        </div>
+        <button class="btn sm" @click="router.push('/settings')">去设置</button>
+      </div>
+
       <!-- 入库进度 -->
-      <div v-if="ingest.running || justFinished" class="pdf-progress">
+      <div v-if="!props.split && (ingest.running || justFinished)" class="pdf-progress">
         <div class="pp-head">
           <span class="pp-label">
             <Icon name="refresh" :size="13" />
@@ -604,7 +687,7 @@ onUnmounted(() => {
 
               <div class="pr-acts" @click.stop>
                 <button
-                  v-if="m.status === 'discovered' || (m.status === 'failed' && !m.chunks)"
+                  v-if="canIngest(m)"
                   class="pa-act"
                   title="加入知识库（解析 + 切块 + 向量化）"
                   :disabled="actingId === m.id"
@@ -625,7 +708,7 @@ onUnmounted(() => {
                   <Icon name="checkCircle" :size="13" />
                 </button>
                 <button
-                  v-if="m.chunks"
+                  v-if="m.chunks && m.scope === 'kb'"
                   class="pa-act"
                   title="重建索引（旧索引保留到替换完成）"
                   :disabled="actingId === m.id"
@@ -649,22 +732,22 @@ onUnmounted(() => {
 
         <div v-if="!filtered.length" class="pdf-empty">
           <Icon name="file" :size="22" />
-          <p v-if="!total">这个目录里还没有 PDF</p>
-          <p v-else-if="keyword || filter">没有符合条件的手册</p>
+          <p v-if="!total">{{ kbScope ? '「数据库索引位置」里还没有 PDF' : '这个目录里还没有 PDF' }}</p>
+          <p v-else-if="filter">没有符合条件的手册</p>
           <p v-else>暂无手册</p>
         </div>
-      </div>
-
-      <!-- 手册少时用一块提示占位，避免整页留白显得像没加载出来 -->
-      <div v-if="total && total <= 8 && !keyword && !filter" class="pdf-tip">
-        <Icon name="folder" :size="16" />
-        <p>把新的 PDF 放进根目录后点「重新扫描」即可登记；入库后可按章节与页码被问答引用。</p>
       </div>
 
       <div v-if="loadError" class="pdf-error"><Icon name="alert" :size="13" />{{ loadError }}</div>
 
       <footer class="card-foot">
-        <span class="foot-dot" />PDF 只记录原路径不复制 · 解析与切块在本地完成，仅切块文本送云端向量化
+        <span class="foot-dot" />
+        <template v-if="kbScope">
+          只收录「数据库索引位置」内的 PDF · 解析与切块在本地完成，仅切块文本送云端向量化
+        </template>
+        <template v-else>
+          PDF 只记录原路径不复制 · 仅「数据库索引位置」内的 PDF 可入库，其余仅供浏览
+        </template>
         <span v-if="rootPath" class="pdf-root" :title="rootPath">{{ rootPath }}</span>
       </footer>
     </template>
@@ -703,7 +786,7 @@ onUnmounted(() => {
         </div>
         <div v-if="currentManual" class="pane-acts" @click.stop>
           <button
-            v-if="currentManual.status === 'discovered' || (currentManual.status === 'failed' && !currentManual.chunks)"
+            v-if="canIngest(currentManual)"
             class="pane-act"
             title="加入知识库（解析 + 切块 + 向量化）"
             :disabled="actingId === currentManual.id"
@@ -721,7 +804,7 @@ onUnmounted(() => {
             <Icon name="checkCircle" :size="14" />
           </button>
           <button
-            v-if="currentManual.chunks"
+            v-if="currentManual.chunks && currentManual.scope === 'kb'"
             class="pane-act"
             title="重建索引（旧索引保留到替换完成）"
             :disabled="actingId === currentManual.id"
@@ -813,7 +896,10 @@ onUnmounted(() => {
   width: clamp(268px, 34%, 430px);
   flex: none;
   min-height: 0;
+  /* 手册页没有标题栏，表头就是第一行：裁掉溢出，保证顶部圆角 */
+  overflow: hidden;
 }
+.pdf-wrap.split .pdf-table-head { border-top: none; }
 /* 知识助手展开 → 左栏自动让位，改成按需滑出的浮层抽屉（不挤压 PDF 宽度）。
    抽屉默认移出可视区，点顶栏列表按钮滑入；选完手册自动收起。 */
 .pdf-wrap.split.rag-narrow > .pdf-card {
@@ -864,7 +950,6 @@ onUnmounted(() => {
   padding: 0 18px 10px;
   flex-wrap: wrap;
 }
-.pdf-toolbar .search-field { flex: 1 1 220px; min-width: 180px; }
 .pdf-toolbar .seg { flex: none; }
 
 .pdf-progress { padding: 0 18px 10px; }
@@ -903,7 +988,7 @@ onUnmounted(() => {
 }
 .pdf-table-head span:nth-child(n + 2) { text-align: center; }
 
-.pdf-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.pdf-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; transition: opacity 0.2s ease; }
 /* 嵌在知识库页里的紧凑模式：列表限高，避免手册多时把页面拉得很长 */
 .pdf-card.compact .pdf-list { max-height: 430px; }
 .pdf-list.loading { opacity: 0.6; }
@@ -973,7 +1058,6 @@ onUnmounted(() => {
   padding-left: 14px;
   padding-right: 14px;
 }
-.pdf-wrap.split .pdf-toolbar .search-field { flex: 1 1 auto; }
 .pdf-wrap.split .seg { display: flex; width: 100%; }
 .pdf-wrap.split .seg-btn {
   flex: 1 1 0;
@@ -985,8 +1069,7 @@ onUnmounted(() => {
 }
 .pdf-wrap.split .seg-btn em { font-size: 9px; margin-left: 2px; }
 .pdf-wrap.split .pdf-progress { padding-left: 14px; padding-right: 14px; }
-/* 提示与根路径在窄列里只会挤压列表，隐藏 */
-.pdf-wrap.split .pdf-tip,
+/* 根路径在窄列里只会挤压列表，隐藏 */
 .pdf-wrap.split .pdf-root { display: none; }
 
 .pr-main { min-width: 0; }
@@ -1070,23 +1153,6 @@ onUnmounted(() => {
 }
 .pdf-empty svg { opacity: 0.4; }
 .pdf-empty p { margin: 0; }
-
-.pdf-tip {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 12px 18px;
-  padding: 11px 14px;
-  border: 1px dashed var(--line);
-  border-radius: 9px;
-  background: #fcfbf8;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.pdf-tip svg { flex: none; opacity: 0.45; }
-.pdf-tip p { margin: 0; }
 
 .pdf-error { display: flex; align-items: center; gap: 6px; padding: 8px 18px; font-size: 11px; color: #b4483f; }
 

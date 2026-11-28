@@ -4,6 +4,8 @@
   /* ---------------- 笔记列表 ---------------- */
   Views.notes = function (el) {
     const state = { q: '', filter: 'all' };
+    // 客户分组折叠：只记「收起的客户名」，搜索/切换筛选时清空（自动全部展开）
+    const collapsed = new Set();
     el.innerHTML = `<div class="page page-notes">
       <section class="card notes-card">
         <header class="card-head notes-head">
@@ -52,8 +54,11 @@
         g.notes.push(n);
       });
       box.innerHTML = groups.map((g) => `
-        <div class="notes-group-label">${icon('folder', 13)} ${U.esc(g.customer)} <span>${g.notes.length}</span></div>
-        ${g.notes.map((n) => {
+        <div class="notes-group-label${collapsed.has(g.customer) ? ' collapsed' : ''}" data-group="${U.esc(g.customer)}">
+          ${icon(collapsed.has(g.customer) ? 'chevronRight' : 'chevronDown', 12)}
+          ${icon('folder', 13)} ${U.esc(g.customer)} <span>${g.notes.length}</span>
+        </div>
+        ${collapsed.has(g.customer) ? '' : g.notes.map((n) => {
           const days = U.daysSince(n.updated);
           return `<div class="note-row" data-note="${n.id}">
             <div class="nr-main">
@@ -70,15 +75,22 @@
           </div>`;
         }).join('')}`).join('');
       box.querySelectorAll('[data-note]').forEach((row) => row.addEventListener('click', () => { location.hash = '#/note/' + row.dataset.note; }));
+      box.querySelectorAll('[data-group]').forEach((head) => head.addEventListener('click', () => {
+        const name = head.dataset.group;
+        if (collapsed.has(name)) collapsed.delete(name); else collapsed.add(name);
+        renderList();
+      }));
     }
 
     let t;
     el.querySelector('#noteSearch').addEventListener('input', (e) => {
       state.q = e.target.value;
+      collapsed.clear();
       clearTimeout(t); t = setTimeout(renderList, 120);
     });
     el.querySelectorAll('[data-nfilter]').forEach((b) => b.addEventListener('click', () => {
       state.filter = b.dataset.nfilter;
+      collapsed.clear();
       el.querySelectorAll('[data-nfilter]').forEach((x) => x.classList.toggle('active', x === b));
       renderList();
     }));
