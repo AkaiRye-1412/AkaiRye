@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.services import indexer, pdf_parse, textutil
+from app.services import config_service, indexer, pdf_parse, textutil
 from app.ws.events import broker
 
 logger = logging.getLogger(__name__)
@@ -159,7 +159,10 @@ def index_manual(conn, manual_id: int) -> dict:
     _set_state(force=True, running=True, manual_id=manual_id, name=row["name"], stage="parsing",
                progress=5, started_at=_now(), finished_at=None, error="")
 
-    parsed = pdf_parse.parse_pdf(path)
+    params = config_service.retrieval_params(conn)
+    parsed = pdf_parse.parse_pdf(
+        path, chunk_chars=params["pdf_chunk_size"], chunk_overlap=params["chunk_overlap"]
+    )
     _set_manual(conn, manual_id, progress=20)
     _set_state(force=True, stage="chunking", progress=20)
 
@@ -182,7 +185,7 @@ def index_manual(conn, manual_id: int) -> dict:
 
     try:
         inputs = [
-            f"{p['title_path'] or ''}\n{p['content'][: indexer.EMBED_MAX_CHARS]}".strip()
+            f"{p['title_path'] or ''}\n{p['content'][: params['embed_max_chars']]}".strip()
             for p in pieces
         ]
         vectors = indexer._embed_texts(conn, inputs, on_batch=on_batch)

@@ -176,45 +176,77 @@ def _norm_key(text: str) -> str:
     return re.sub(r"\d+", "#", text)
 
 
-def _split_lines(lines: list[tuple[int, str]], max_chars: int = CHUNK_MAX_CHARS) -> list[tuple[int, list[str]]]:
+def _split_lines(lines: list[tuple[int, str]], max_chars: int = CHUNK_MAX_CHARS,
+                 overlap: int = 0) -> list[tuple[int, list[str]]]:
     """把一节正文按字符预算切段：优先在句末断，避免把一句话劈开。
 
     返回 [(起始页, 行列表)]；行列表已保证长度 <= max_chars（超长单行按标点硬切）。
+    overlap>0 时把上一段尾部的整行带到下一段开头（页码沿用原行，引用不会跳页）。
     """
-    out: list[tuple[int, list[str]]] = []
-    buf: list[str] = []
-    size = 0
-    start_page = lines[0][0] if lines else 1
-
-    def flush() -> None:
-        nonlocal buf, size, start_page
-        if buf:
-            out.append((start_page, buf))
-        buf, size = [], 0
-
+    # 1) 超长单行（表格/无换行段落）先按标点硬切，后续累积都基于 <= max_chars 的行
+    items: list[tuple[int, str]] = []
     for page, text in lines:
-        # 超长单行（表格/无换行段落）先按标点硬切
-        while len(text) > max_chars:
-            cut = max(text.rfind(ch, 0, max_chars) for ch in "。！？；.!?;，,") + 1
+        if len(text) <= max_chars:
+            items.append((page, text))
+            continue
+        rest = text
+        while len(rest) > max_chars:
+            cut = max(rest.rfind(ch, 0, max_chars) for ch in "。！？；.!?;，,") + 1
             if cut <= 0:
                 cut = max_chars
-            piece, text = text[:cut], text[cut:]
-            if buf:
-                flush()
-            out.append((page, [piece]))
+            items.append((page, rest[:cut]))
+            rest = rest[cut:]
+        if rest:
+            items.append((page, rest))
+
+    out: list[tuple[int, list[str]]] = []
+    buf: list[tuple[int, str]] = []
+    size = 0
+    carry_n = 0  # 开头有几行是上一段带过来的重叠，不计入"本段已有新内容"
+
+    def flush() -> list[tuple[int, str]]:
+        nonlocal buf, size
+        if buf:
+            out.append((buf[0][0], [t for _, t in buf]))
+        carry: list[tuple[int, str]] = []
+        if overlap > 0 and buf:
+            # 只带「尾部 overlap 个字符」，不整行带：整行可能本身就接近上限，
+            # 带上后就必然超预算（一块 600 字，页面却写着 300）
+            tail = "\n".join(t for _, t in buf)[-overlap:].lstrip()
+            if tail:
+                carry = [(buf[-1][0], tail)]
+        buf, size = [], 0
+        return carry
+
+    for page, text in items:
         if buf and size + len(text) > max_chars:
-            flush()
-        if not buf:
-            start_page = page
-        buf.append(text)
+            if len(buf) > carry_n:
+                carry = flush()
+                buf = list(carry)
+                carry_n = len(buf)
+                size = sum(len(t) for _, t in buf)
+        # 落到这里若仍超预算（缓冲里只剩重叠内容，或重叠 + 本行本身就满），
+        # 按剩余预算裁短重叠；裁不下就丢掉——绝不为了重叠把块撑过上限
+        if buf and size + len(text) > max_chars:
+            keep = max_chars - len(text)
+            if keep <= 0:
+                buf, size, carry_n = [], 0, 0
+            else:
+                pg, tx = buf[-1]
+                buf = [(pg, tx[-keep:])]
+                size = keep
+        buf.append((page, text))
         size += len(text)
     flush()
     return out
 
 
-def parse_pdf(path: str | Path, *, max_pages: int = 4000) -> ParsedPdf:
+def parse_pdf(path: str | Path, *, max_pages: int = 4000,
+              chunk_chars: int = CHUNK_MAX_CHARS, chunk_overlap: int = 0) -> ParsedPdf:
     """解析 PDF → 章节感知的切块列表。
 
+    chunk_chars / chunk_overlap 由设置页「检索与切分参数」下发；改这两个值后
+    已入库的手册需要重新解析入库才会按新参数切块。
     异常：文件不存在抛 FileNotFoundError；加密/损坏抛 ValueError；
     无文本层（扫描件）抛 PdfNoTextError——由调用方把 manual 置 failed 并给出可读原因。
     """
@@ -282,7 +314,7 @@ def parse_pdf(path: str | Path, *, max_pages: int = 4000) -> ParsedPdf:
         for sec in sections:
             title_path = sec["title_path"]
             # 每节第一行就是该节标题（构建 section 时写入），保留在正文里让块自解释
-            for page, part_lines in _split_lines(sec["lines"]):
+            for page, part_lines in _split_lines(sec["lines"], chunk_chars, chunk_overlap):
                 content = "\n".join(part_lines).strip()
                 if len(content) < CHUNK_MIN_CHARS:
                     continue

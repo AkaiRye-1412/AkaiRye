@@ -35,6 +35,21 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "draft_roots": [],
     },
     "index.whitelist": {"folders": ["客户售后问题"], "excluded": []},
+    # 检索与切分参数（设置页可调；改切分参数只对之后的索引/重建生效）
+    "retrieval": {
+        "top_k": 8,            # 进 prompt 的片段数
+        "min_similarity": 0.0,  # 余弦相似度下限，0 = 不设阈值
+        "chunk_size": 1200,     # 笔记切块上限（字符）
+        "pdf_chunk_size": 900,  # 手册 PDF 切块上限（字符）
+        "chunk_overlap": 0,     # 相邻块重叠字符数
+        "history_turns": 10,    # 追问携带的历史消息条数（0 = 不带）
+        "embed_max_chars": 700,  # 送进嵌入模型的正文截断长度
+        # 本地 reranker（BGE cross-encoder，FlagEmbedding 推理）：先召回一批，再精排取前 top_k
+        "rerank_enabled": False,     # 是否启用精排
+        "rerank_model_path": "",     # 权重目录（如 D:/models/bge-reranker-v2-m3）
+        "rerank_top_n": 30,          # 召回给 reranker 的候选条数（越大越慢，个人规模 30 够用）
+        "rerank_keep": 8,            # 精排后保留进 prompt 的条数（通常 = top_k）
+    },
     "dashboard": {"follow_up_days": 7, "default_range": "month"},
     "backup": {"dir": "", "keep": 7},
     "shortcuts": {"global_ask": "Ctrl+K", "new_note": "Ctrl+N", "terminal": "Ctrl+T", "send": "Enter"},
@@ -79,6 +94,9 @@ def save_many(conn, patch: dict[str, Any]) -> list[str]:
                 # 掩码/空值 = 保留原密钥，密钥永不被前端写回
                 value["api_key"] = old.get("api_key", "")
         merged = {**current.get(key, {}), **value} if isinstance(value, dict) else value
+        # 检索/切分参数写库前先钳：前端已钳过一遍，这里兜住直接打 API 的调用方
+        if key == "retrieval" and isinstance(merged, dict):
+            merged = _clamp_retrieval(merged)
         conn.execute(
             "INSERT INTO config (key, value_json, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
@@ -89,6 +107,59 @@ def save_many(conn, patch: dict[str, Any]) -> list[str]:
     conn.commit()
     broker.publish("config.updated", {"keys": saved})
     return saved
+
+
+# 检索/切分参数的合法区间（设置页可填任意值，越界在这里钳，避免脏配置把检索搞挂）
+_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    "top_k": (1, 30),
+    "min_similarity": (0.0, 1.0),
+    "chunk_size": (200, 4000),
+    "pdf_chunk_size": (300, 4000),
+    "chunk_overlap": (0, 500),
+    "history_turns": (0, 50),
+    "embed_max_chars": (100, 8000),
+    "rerank_top_n": (5, 100),
+    "rerank_keep": (1, 30),
+}
+
+# 数值型键（其它是字符串/布尔，不进 _num 的钳制）
+_INT_KEYS = ("top_k", "chunk_size", "pdf_chunk_size", "chunk_overlap", "history_turns",
+             "embed_max_chars", "rerank_top_n", "rerank_keep")
+
+
+def _num(value: Any, default: float) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return default
+    return n if n == n else default  # NaN 兜底
+
+
+def retrieval_params(conn) -> dict[str, Any]:
+    """检索与切分参数（含钳制）：检索线程与索引线程都从这里取，不各自读常量。
+
+    重叠还要额外压到「分块大小的一半」以内，否则切块会在原地打转（每块都塞满上一块）。
+    """
+    return _clamp_retrieval(get_raw(conn, "retrieval"))
+
+
+def _clamp_retrieval(raw: dict[str, Any]) -> dict[str, Any]:
+    """把一组 retrieval 参数钳进合法区间（写库与读库都走这里，库里不会留下脏值）。"""
+    out: dict[str, Any] = {}
+    for key, (lo, hi) in _PARAM_BOUNDS.items():
+        default = float(DEFAULT_CONFIG["retrieval"][key])
+        out[key] = max(lo, min(hi, _num(raw.get(key), default)))
+    for key in _INT_KEYS:
+        out[key] = int(round(out[key]))
+    cap = max(0, min(out["chunk_size"], out["pdf_chunk_size"]) // 2)
+    out["chunk_overlap"] = min(out["chunk_overlap"], cap)
+    # reranker 布尔：显式传入字符串 "false"/"0" 也算关，避免前端序列化把布尔写歪
+    out["rerank_enabled"] = bool(raw.get("rerank_enabled", False)) and str(
+        raw.get("rerank_enabled")
+    ).strip().lower() not in ("false", "0", "off", "")
+    # reranker 模型路径：字符串，不去数字钳制
+    out["rerank_model_path"] = str(raw.get("rerank_model_path") or "").strip()
+    return out
 
 
 def _mask_secrets(cfg: dict[str, Any]) -> None:

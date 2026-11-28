@@ -116,6 +116,20 @@ function toggleGroup(name: string) {
   collapsedGroups.value = next
 }
 
+/** 是否「已全部收起」：表头那枚图标据此切换箭头方向与文案；空列表不算全收。 */
+const allGroupsCollapsed = computed(
+  () => grouped.value.length > 0 && grouped.value.every((g) => collapsedGroups.value.has(g.customer)),
+)
+
+/** 一键折叠：全展开 → 全收起；已全收起 → 全展开。 */
+function toggleAllGroups() {
+  if (allGroupsCollapsed.value) {
+    collapsedGroups.value = new Set()
+    return
+  }
+  collapsedGroups.value = new Set(grouped.value.map((g) => g.customer))
+}
+
 watch([keyword, filter], () => {
   if (collapsedGroups.value.size) collapsedGroups.value = new Set()
 })
@@ -769,7 +783,21 @@ onUnmounted(() => {
       </header>
 
       <div class="notes-table-head">
-        <span>项目 / 客户</span><span>状态</span><span>{{ notes.some((n) => n.note_mode === 'card') ? '日期' : '开始' }}</span>
+        <span class="th-collapse-wrap">
+          <span>项目 / 客户</span>
+          <button
+            v-if="grouped.length"
+            class="th-collapse"
+            :class="{ on: allGroupsCollapsed }"
+            type="button"
+            :title="allGroupsCollapsed ? '展开全部分组' : '收起全部分组'"
+            :aria-label="allGroupsCollapsed ? '展开全部分组' : '收起全部分组'"
+            @click="toggleAllGroups"
+          >
+            <Icon :name="allGroupsCollapsed ? 'chevronsUpDown' : 'chevronsDownUp'" :size="15" />
+          </button>
+        </span>
+        <span>状态</span><span>{{ notes.some((n) => n.note_mode === 'card') ? '日期' : '开始' }}</span>
         <span>最近更新</span><span>标签</span><span></span>
       </div>
 

@@ -122,6 +122,22 @@ function toggleFolder(dir: string) {
   collapsedFolders.value = next
 }
 
+/** 是否「已全部收起」：列表表头那枚图标据此在两态间切换文案与箭头方向。
+ *  空列表不算全收（否则图标显示成「展开」，点了也没东西可展）。 */
+const allFoldersCollapsed = computed(
+  () => grouped.value.length > 0 && grouped.value.every((g) => collapsedFolders.value.has(g.dir)),
+)
+
+/** 一键折叠：全展开时全收起，已经是全收起时反过来全展开——
+ *  只留一个按钮，不占表头位置，也不用记上次点的是哪个。 */
+function toggleAllFolders() {
+  if (allFoldersCollapsed.value) {
+    collapsedFolders.value = new Set()
+    return
+  }
+  collapsedFolders.value = new Set(grouped.value.map((g) => g.dir))
+}
+
 watch(keyword, () => {
   if (collapsedFolders.value.size) collapsedFolders.value = new Set()
 })
@@ -600,7 +616,21 @@ onUnmounted(() => {
       </header>
 
       <div class="memos-table-head">
-        <span>笔记</span><span>最近更新</span><span></span>
+        <span class="th-collapse-wrap">
+          <span>笔记</span>
+          <button
+            v-if="grouped.length"
+            class="th-collapse"
+            :class="{ on: allFoldersCollapsed }"
+            type="button"
+            :title="allFoldersCollapsed ? '展开全部分组' : '收起全部分组'"
+            :aria-label="allFoldersCollapsed ? '展开全部分组' : '收起全部分组'"
+            @click="toggleAllFolders"
+          >
+            <Icon :name="allFoldersCollapsed ? 'chevronsUpDown' : 'chevronsDownUp'" :size="15" />
+          </button>
+        </span>
+        <span>最近更新</span><span></span>
       </div>
 
       <div class="memos-list">

@@ -17,7 +17,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from app.services import config_service, indexer, textutil
+from app.services import config_service, indexer, reranker, textutil
 from app.ws.events import broker
 
 logger = logging.getLogger(__name__)
@@ -301,8 +301,26 @@ def _enrich(conn, rows: list[dict]) -> list[dict]:
     return rows
 
 
-def retrieve(conn, question: str, scope: dict, top_k: int = DEFAULT_TOP_K) -> dict:
-    """混合检索：FTS + 向量双路 → RRF 融合 → scope 过滤。返回 {chunks, vector_used}。"""
+def retrieve(conn, question: str, scope: dict, top_k: int | None = None,
+             min_similarity: float | None = None, rerank: dict | None = None) -> dict:
+    """混合检索：FTS + 向量双路 → RRF 融合 → scope 过滤 →（可选）reranker 精排。
+
+    top_k / min_similarity 传 None 时读设置页配置（config.retrieval）。
+    min_similarity 作用于**向量路**：余弦相似度低于阈值的候选在进 RRF 前就被丢掉，
+    避免"沾边就进 prompt"；阈值 0 = 不设限（默认）。
+    rerank：启用时先多召回一批（rerank_top_n），用本地 reranker 精排后取 rerank_keep 条。
+    """
+    if top_k is None or min_similarity is None or rerank is None:
+        params = config_service.retrieval_params(conn)
+        top_k = params["top_k"] if top_k is None else top_k
+        min_similarity = params["min_similarity"] if min_similarity is None else min_similarity
+        if rerank is None:
+            rerank = {
+                "enabled": params["rerank_enabled"],
+                "model_path": params["rerank_model_path"],
+                "top_n": params["rerank_top_n"],
+                "keep": params["rerank_keep"],
+            }
     pred = _scope_predicate(conn, scope)
 
     # 关键词路（FTS5，V2 spike phrase_expr：短语邻接 + token 精确）
@@ -326,13 +344,24 @@ def retrieve(conn, question: str, scope: dict, top_k: int = DEFAULT_TOP_K) -> di
             qvec = indexer._embed_texts(conn, [question])  # 未配置返回 None（FTS-only 降级）
             if qvec:
                 vector_used = True
+                qjson = json.dumps(qvec[0])
+                # 相似度阈值用 vec_distance_cosine 实测（不依赖向量是否归一化），
+                # 低于阈值的候选直接不参与 RRF：宁可少给几块，也别把不相关的内容喂给模型
                 rows = conn.execute(
-                    "SELECT c.id, c.note_path, c.title_path, c.content, c.source_type, c.manual_id, c.page"
+                    "SELECT c.id, c.note_path, c.title_path, c.content, c.source_type, c.manual_id, c.page,"
+                    " vec_distance_cosine(v.embedding, ?) AS cos_dist"
                     " FROM chunk_vec v JOIN chunk c ON c.id=v.rowid"
                     " WHERE v.embedding MATCH ? AND k=?",
-                    (json.dumps(qvec[0]), VEC_FETCH),
+                    (qjson, qjson, VEC_FETCH),
                 ).fetchall()
-                vec_rows = _enrich(conn, [dict(r) for r in rows])
+                kept = []
+                for r in rows:
+                    item = dict(r)
+                    item["similarity"] = round(1.0 - float(item["cos_dist"]), 4)
+                    kept.append(item)
+                if min_similarity and min_similarity > 0:
+                    kept = [r for r in kept if r["similarity"] >= min_similarity]
+                vec_rows = _enrich(conn, kept)
         except Exception as e:  # noqa: BLE001 —— 向量路失败降级为纯关键词（不阻断问答）
             logger.warning("向量检索失败，降级纯关键词：%s", e)
 
@@ -346,14 +375,24 @@ def retrieve(conn, question: str, scope: dict, top_k: int = DEFAULT_TOP_K) -> di
             first.setdefault(cid, chunk)
 
     merged = []
+    # 启用 rerank 时先多召回一批候选，供 reranker 精排；否则直接按 top_k 截
+    fetch_limit = max(top_k, rerank["top_n"]) if rerank.get("enabled") else top_k
     for cid, score in sorted(scores.items(), key=lambda kv: -kv[1]):
         chunk = first[cid]
         chunk["rrf_score"] = round(score, 6)
         if pred(chunk):
             merged.append(chunk)
-        if len(merged) >= top_k:
+        if len(merged) >= fetch_limit:
             break
-    return {"chunks": merged, "vector_used": vector_used}
+
+    if rerank.get("enabled") and len(merged) > 1:
+        model_path = rerank.get("model_path") or ""
+        if reranker.enabled(model_path):
+            before = merged
+            merged = reranker.rerank(question, merged, model_path, rerank["keep"])
+            return {"chunks": merged, "vector_used": vector_used, "reranked": True,
+                    "rerank_candidates": len(before)}
+    return {"chunks": merged, "vector_used": vector_used, "reranked": False}
 
 
 # ---- Prompt 组装 --------------------------------------------------------------
@@ -366,15 +405,19 @@ SYSTEM_PROMPT = (
     "3. 两方面都不足以回答时，明确回答\"知识库中未找到相关依据\"，禁止编造。"
 )
 
-HISTORY_TURNS = 10  # 携带的最近消息条数（约 5 轮对话，个人规模足够）
+HISTORY_TURNS = 10  # 默认携带的最近消息条数（约 5 轮；设置页 config.retrieval 可调，0 = 不记忆）
 
 
-def _load_history(conn, session_id: int, before_id: int) -> list[dict]:
-    """会话历史（当前提问之前的消息；跳过空的 assistant 占位）。"""
+def _load_history(conn, session_id: int, before_id: int, limit: int | None = None) -> list[dict]:
+    """会话历史（当前提问之前的消息；跳过空的 assistant 占位）。limit<=0 即完全不带历史。"""
+    if limit is None:
+        limit = config_service.retrieval_params(conn)["history_turns"]
+    if limit <= 0:
+        return []
     rows = conn.execute(
         "SELECT role, content FROM rag_message WHERE session_id=? AND id<? AND content != ''"
         " ORDER BY id DESC LIMIT ?",
-        (session_id, before_id, HISTORY_TURNS),
+        (session_id, before_id, limit),
     ).fetchall()
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
@@ -504,9 +547,13 @@ def _generate_worker(conn_factory, session_id: int, message_id: int, user_messag
     try:
         conn = conn_factory()
         try:
-            result = retrieve(conn, question, scope)
+            params = config_service.retrieval_params(conn)
+            result = retrieve(conn, question, scope, top_k=params["top_k"],
+                              min_similarity=params["min_similarity"])
             chunks = result["chunks"]
-            history = _load_history(conn, session_id, user_message_id)
+            if result.get("reranked"):
+                logger.info("reranker 精排：%d 候选 → 取 %d 条", result.get("rerank_candidates", 0), len(chunks))
+            history = _load_history(conn, session_id, user_message_id, params["history_turns"])
 
             if not chunks and not history:
                 # 首问且无命中：无上下文可依托，直接明确未找到（不浪费 LLM 调用）

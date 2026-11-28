@@ -66,21 +66,64 @@ def phrase_expr(q: str) -> str:
     return " OR ".join(out)
 
 
-def _split_long(text: str, max_chars: int) -> list[str]:
-    """超长块按空行段落累积拆分。"""
+def _hard_cut(text: str, max_chars: int) -> list[str]:
+    """单段就超长时按句末标点硬切（切不动才按字数切），保证块不会超过上限。
+
+    没有这一步时，一个 3000 字的整段会整块入库：既超过「分块大小」的设置，
+    也会在嵌入时被 EMBED_MAX_CHARS 砍掉大半，向量只代表前半段。
+    """
+    out: list[str] = []
+    rest = text
+    while len(rest) > max_chars:
+        cut = max(rest.rfind(ch, 0, max_chars) for ch in "。！？；.!?;\n") + 1
+        if cut <= 0:
+            cut = max_chars
+        out.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        out.append(rest)
+    return out
+
+
+def _overlap_tail(text: str, overlap: int) -> str:
+    """取上一块的尾部作下一块的开头；尽量从句首/段首起，避免半句话就开场。"""
+    if overlap <= 0 or not text:
+        return ""
+    tail = text[-overlap:]
+    # 在尾段里找一个自然断点（换行优先），断点后内容作为重叠部分
+    for sep in ("\n", "。", "！", "？", "；", ". ", "! ", "? ", "，", ", "):
+        i = tail.find(sep)
+        if 0 <= i < len(tail) - 1 and len(tail) - (i + len(sep)) >= overlap // 2:
+            return tail[i + len(sep):].lstrip()
+    return tail
+
+
+def _split_long(text: str, max_chars: int, overlap: int = 0) -> list[str]:
+    """超长块按空行段落累积拆分；overlap>0 时相邻块共享一段尾巴。"""
     if len(text) <= max_chars:
         return [text]
     parts: list[str] = []
+
+    def emit(piece: str) -> None:
+        parts.append(piece)
+
     buf: list[str] = []
     size = 0
+    # 硬切时给重叠留出位置：seg + 上一块尾巴 才不会超过 max_chars
+    seg_max = max(1, max_chars - overlap)
     for para in re.split(r"\n\s*\n", text):
-        if buf and size + len(para) > max_chars:
-            parts.append("\n\n".join(buf))
-            buf, size = [], 0
-        buf.append(para)
-        size += len(para) + 2  # 段落分隔符计入，避免累积长度失真
+        for seg in _hard_cut(para, seg_max) if len(para) > seg_max else [para]:
+            if buf and size + len(seg) > max_chars:
+                emit("\n\n".join(buf))
+                buf, size = [], 0
+                tail = _overlap_tail(parts[-1], overlap)
+                if tail:
+                    buf.append(tail)
+                    size = len(tail) + 2
+            buf.append(seg)
+            size += len(seg) + 2  # 段落分隔符计入，避免累积长度失真
     if buf:
-        parts.append("\n\n".join(buf))
+        emit("\n\n".join(buf))
     return parts
 
 
@@ -94,11 +137,12 @@ def strip_frontmatter(text: str) -> str:
     return text[m.end() :] if m else text
 
 
-def chunk_note_markdown(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[dict]:
+def chunk_note_markdown(text: str, max_chars: int = MAX_CHUNK_CHARS, overlap: int = 0) -> list[dict]:
     """售后笔记切块：按标题分节（title_path 记录标题层级路径），超长按段落拆。
 
     售后笔记形态为 `# 标题` + `## 日期小节`（FR-NOTE-08），按 `## ` 分节
     正好对应一次现场处理记录，是天然检索单元；无标题正文整文为一块。
+    max_chars / overlap 由设置页「检索与切分参数」下发（见 config.retrieval）。
     返回 [{seq, title_path, content}]（content 含所属标题行，保证切块自含语义）。
     """
     body = strip_frontmatter(text).strip()
@@ -144,7 +188,7 @@ def chunk_note_markdown(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[dic
         content = "\n".join(lines).strip()
         if not content:
             continue
-        for piece in _split_long(content, max_chars):
+        for piece in _split_long(content, max_chars, overlap):
             piece = piece.strip()
             if len(piece) < MIN_CHUNK_CHARS:
                 continue  # 过滤纯分隔线等噪声

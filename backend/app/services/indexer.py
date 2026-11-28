@@ -265,7 +265,11 @@ def index_note(conn, rel: str, *, force: bool = False) -> dict:
         _set_status(conn, rel, "failed", "文件不存在（可能已被移动或删除）")
         return {"status": "missing", "chunks": 0, "reason": "文件不存在"}
     text = abs_path.read_bytes().decode("utf-8", errors="replace")
-    pieces = textutil.chunk_note_markdown(text)
+    params = config_service.retrieval_params(conn)
+    pieces = textutil.chunk_note_markdown(
+        text, max_chars=params["chunk_size"], overlap=params["chunk_overlap"]
+    )
+    embed_max = params["embed_max_chars"]
     cfg = _embedding_cfg(conn)
     model_id = _model_id(cfg)
 
@@ -280,8 +284,8 @@ def index_note(conn, rel: str, *, force: bool = False) -> dict:
             _set_status(conn, rel, "ready")
             return {"status": "skipped", "chunks": len(old), "reason": "内容与模型未变化"}
 
-    # 嵌入输入：标题 + 内容前段（截断可省配额；标题已能代表该块主题）
-    embed_inputs = [f"{p['title_path'] or ''}\n{p['content'][:EMBED_MAX_CHARS]}".strip() for p in pieces]
+    # 嵌入输入：标题 + 内容前段（截断长度可配；默认 700 是为了省云端配额，本机可放大到分块上限）
+    embed_inputs = [f"{p['title_path'] or ''}\n{p['content'][:embed_max]}".strip() for p in pieces]
     embed_error = ""
     dim = 0
     try:

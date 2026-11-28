@@ -654,3 +654,33 @@ kbd {
   border-radius: 4px;
 }
 .search-clear:hover { background: #f1f0eb; color: var(--ink); }
+
+/* 列表表头的一键折叠按钮（个人笔记 / 售后笔记共用）：
+   放在「笔记」「项目 / 客户」列名右侧，点一下全收、再点全展，
+   两个页面同一套视觉，避免各写一份。 */
+.th-collapse-wrap { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+/* 列名在窄栏（两栏模式）里宁可省略号，也别把按钮挤出去 */
+.th-collapse-wrap > span:first-child { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.th-collapse {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  /* 图标比列名字小一号：它是辅助操作，不该抢过表头标题 */
+  transition: background 0.12s, color 0.12s;
+}
+/* 两种状态的双箭头在小尺寸下长得都像「◇」，光靠方向分不清，
+   所以「已全部收起」时给按钮上蓝底蓝字——一眼看出列表现在是折着的 */
+.th-collapse.on { color: var(--blue); background: #eaf2fe; }
+/* 15px 下 1.06px 的描边偏虚，压到 2 才立得住 */
+.th-collapse svg { stroke-width: 2; }
+.th-collapse:hover { background: #eef4fb; color: var(--blue); }
+.th-collapse:active { background: #e4eefb; }
+.th-collapse:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }

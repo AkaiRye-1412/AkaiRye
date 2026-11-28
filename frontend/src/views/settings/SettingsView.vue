@@ -267,6 +267,26 @@ function removeRoot(key: RootGroupKey, index: number) {
 }
 const dashboard = reactive({ follow_up_days: 7, default_range: 'month' })
 
+/**
+ * 检索与切分参数（config.retrieval）
+ * 默认值与后端 DEFAULT_CONFIG["retrieval"] 一致；越界值在 payload 里先钳一次，
+ * 免得存完服务端钳过的值和表单里的大数对不上，永远显示"未保存"。
+ */
+const RETRIEVAL_DEFAULTS = {
+  top_k: 8,
+  min_similarity: 0,
+  chunk_size: 1200,
+  pdf_chunk_size: 900,
+  chunk_overlap: 0,
+  history_turns: 10,
+  embed_max_chars: 700,
+  rerank_enabled: false,
+  rerank_model_path: '',
+  rerank_top_n: 30,
+  rerank_keep: 8,
+}
+const retrieval = reactive({ ...RETRIEVAL_DEFAULTS })
+
 const showLlmKey = ref(false)
 const showEmbKey = ref(false)
 
@@ -375,6 +395,55 @@ function dashboardPayload() {
   }
 }
 
+function retrievalPayload() {
+  const clamp = (v: unknown, lo: number, hi: number, def: number) => {
+    const n = Number(v)
+    return Math.min(hi, Math.max(lo, Number.isFinite(n) ? n : def))
+  }
+  const chunk = Math.round(clamp(retrieval.chunk_size, 200, 4000, 1200))
+  const pdfChunk = Math.round(clamp(retrieval.pdf_chunk_size, 300, 4000, 900))
+  // 重叠不能超过小块的一半，否则每块都在重复上一块、切不出新内容（与后端同一口径）
+  const overlapCap = Math.min(500, Math.floor(Math.min(chunk, pdfChunk) / 2))
+  const sim = clamp(retrieval.min_similarity, 0, 1, 0)
+  return {
+    top_k: Math.round(clamp(retrieval.top_k, 1, 30, 8)),
+    min_similarity: Math.round(sim * 100) / 100,
+    chunk_size: chunk,
+    pdf_chunk_size: pdfChunk,
+    chunk_overlap: Math.round(clamp(retrieval.chunk_overlap, 0, overlapCap, 0)),
+    history_turns: Math.round(clamp(retrieval.history_turns, 0, 50, 10)),
+    embed_max_chars: Math.round(clamp(retrieval.embed_max_chars, 100, 8000, 700)),
+    rerank_enabled: !!retrieval.rerank_enabled,
+    rerank_model_path: retrieval.rerank_model_path.trim(),
+    rerank_top_n: Math.round(clamp(retrieval.rerank_top_n, 5, 100, 30)),
+    rerank_keep: Math.round(clamp(retrieval.rerank_keep, 1, 30, 8)),
+  }
+}
+
+/** 恢复默认值（仅改表单，仍需顶部保存才落库） */
+function resetRetrieval() {
+  Object.assign(retrieval, { ...RETRIEVAL_DEFAULTS })
+}
+
+/** 嵌入上限比分块小会让尾部进不了向量，提示一下（不阻塞保存） */
+const retrievalHints = computed(() => {
+  const p = retrievalPayload()
+  const out: string[] = []
+  if (p.embed_max_chars < p.chunk_size) {
+    out.push(`嵌入上限 ${p.embed_max_chars} 小于笔记分块 ${p.chunk_size}，超出的尾部不进向量`)
+  }
+  if (p.chunk_overlap > 0) {
+    out.push(`重叠 ${p.chunk_overlap} 字会按比例增加块数，重建索引会变慢`)
+  }
+  if (p.rerank_enabled && !p.rerank_model_path) {
+    out.push('已启用重排但未填模型路径，精排不会生效')
+  }
+  if (p.rerank_enabled && p.rerank_top_n < p.rerank_keep) {
+    out.push(`精排候选数 ${p.rerank_top_n} 小于保留数 ${p.rerank_keep}，保留数按候选数封顶`)
+  }
+  return out
+})
+
 function snapshot() {
   return {
     llm: JSON.stringify(llmPayload()),
@@ -382,6 +451,7 @@ function snapshot() {
     paths: JSON.stringify(pathsPayload()),
     dbFile: dbFileDir.value.trim(),
     dashboard: JSON.stringify(dashboardPayload()),
+    retrieval: JSON.stringify(retrievalPayload()),
   }
 }
 
@@ -392,6 +462,7 @@ const applied = ref<Record<SectionKey, string>>({
   paths: '',
   dbFile: '',
   dashboard: '',
+  retrieval: '',
 })
 
 const dirty = computed(() => {
@@ -402,6 +473,7 @@ const dirty = computed(() => {
     paths: now.paths !== applied.value.paths,
     dbFile: now.dbFile !== applied.value.dbFile,
     dashboard: now.dashboard !== applied.value.dashboard,
+    retrieval: now.retrieval !== applied.value.retrieval,
   }
 })
 
@@ -431,6 +503,19 @@ function syncFromStore() {
   Object.assign(dashboard, {
     follow_up_days: c.dashboard?.follow_up_days ?? 7,
     default_range: c.dashboard?.default_range ?? 'month',
+  })
+  Object.assign(retrieval, {
+    top_k: c.retrieval?.top_k ?? RETRIEVAL_DEFAULTS.top_k,
+    min_similarity: c.retrieval?.min_similarity ?? RETRIEVAL_DEFAULTS.min_similarity,
+    chunk_size: c.retrieval?.chunk_size ?? RETRIEVAL_DEFAULTS.chunk_size,
+    pdf_chunk_size: c.retrieval?.pdf_chunk_size ?? RETRIEVAL_DEFAULTS.pdf_chunk_size,
+    chunk_overlap: c.retrieval?.chunk_overlap ?? RETRIEVAL_DEFAULTS.chunk_overlap,
+    history_turns: c.retrieval?.history_turns ?? RETRIEVAL_DEFAULTS.history_turns,
+    embed_max_chars: c.retrieval?.embed_max_chars ?? RETRIEVAL_DEFAULTS.embed_max_chars,
+    rerank_enabled: c.retrieval?.rerank_enabled ?? RETRIEVAL_DEFAULTS.rerank_enabled,
+    rerank_model_path: c.retrieval?.rerank_model_path ?? RETRIEVAL_DEFAULTS.rerank_model_path,
+    rerank_top_n: c.retrieval?.rerank_top_n ?? RETRIEVAL_DEFAULTS.rerank_top_n,
+    rerank_keep: c.retrieval?.rerank_keep ?? RETRIEVAL_DEFAULTS.rerank_keep,
   })
   applied.value = snapshot()
   showLlmKey.value = false
@@ -572,6 +657,12 @@ async function saveAll() {
     if (dirty.value.dashboard) {
       await step('看板', async () => {
         await configStore.save({ dashboard: dashboardPayload() })
+      })
+    }
+    if (dirty.value.retrieval) {
+      await step('检索与切分', async () => {
+        await configStore.save({ retrieval: retrievalPayload() })
+        saveNote = '检索参数已热生效；切分参数只对之后的索引/重建生效'
       })
     }
 
@@ -1058,6 +1149,245 @@ const indexPct = computed(() => {
         </div>
       </section>
 
+      <!-- ==================== 检索与切分参数 ==================== -->
+      <section class="card cfg-card">
+        <header class="cfg-head">
+          <div class="cfg-ic blue"><Icon name="scissors" :size="17" /></div>
+          <div class="cfg-head-text">
+            <h3>检索与切分参数</h3>
+            <span>问什么、给多少、切成多大一块</span>
+          </div>
+          <span class="badge" :class="dirty.retrieval ? 'warn' : 'ok-soft'">
+            {{ dirty.retrieval ? '待保存' : '已生效' }}
+          </span>
+        </header>
+        <div class="cfg-body">
+          <div class="cfg-row">
+            <label class="field">
+              <span class="field-label">
+                检索条数 TOP_K
+                <em class="field-badge">1–30</em>
+              </span>
+              <div class="input-suffix">
+                <input
+                  v-model.number="retrieval.top_k"
+                  class="input mono"
+                  type="number"
+                  min="1"
+                  max="30"
+                  step="1"
+                  inputmode="numeric"
+                />
+                <em>条</em>
+              </div>
+            </label>
+            <label class="field">
+              <span class="field-label">
+                相似度阈值
+                <em class="field-badge">0 = 不限</em>
+              </span>
+              <input
+                v-model.number="retrieval.min_similarity"
+                class="input mono"
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                inputmode="decimal"
+                title="余弦相似度下限，低于它的向量候选不参与融合"
+              />
+            </label>
+          </div>
+
+          <div class="cfg-row">
+            <label class="field">
+              <span class="field-label">
+                笔记分块大小
+                <em class="field-badge">200–4000 字</em>
+              </span>
+              <div class="input-suffix">
+                <input
+                  v-model.number="retrieval.chunk_size"
+                  class="input mono"
+                  type="number"
+                  min="200"
+                  max="4000"
+                  step="50"
+                  inputmode="numeric"
+                />
+                <em>字</em>
+              </div>
+            </label>
+            <label class="field">
+              <span class="field-label">
+                手册分块大小
+                <em class="field-badge">300–4000 字</em>
+              </span>
+              <div class="input-suffix">
+                <input
+                  v-model.number="retrieval.pdf_chunk_size"
+                  class="input mono"
+                  type="number"
+                  min="300"
+                  max="4000"
+                  step="50"
+                  inputmode="numeric"
+                />
+                <em>字</em>
+              </div>
+            </label>
+          </div>
+
+          <div class="cfg-row">
+            <label class="field">
+              <span class="field-label">分块重叠</span>
+              <div class="input-suffix">
+                <input
+                  v-model.number="retrieval.chunk_overlap"
+                  class="input mono"
+                  type="number"
+                  min="0"
+                  max="500"
+                  step="10"
+                  inputmode="numeric"
+                  title="相邻块共享的尾部字数，避免一句话被切在边界上；超过小块一半会被自动压低"
+                />
+                <em>字</em>
+              </div>
+            </label>
+            <label class="field">
+              <span class="field-label">
+                上下文历史消息数
+                <em class="field-badge">0 = 不记忆</em>
+              </span>
+              <div class="input-suffix">
+                <input
+                  v-model.number="retrieval.history_turns"
+                  class="input mono"
+                  type="number"
+                  min="0"
+                  max="50"
+                  step="2"
+                  inputmode="numeric"
+                  title="追问时随问题带给模型的历史消息条数（2 条 ≈ 1 轮问答）"
+                />
+                <em>条</em>
+              </div>
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field-label">
+              嵌入输入上限
+              <em class="field-badge">100–8000 字</em>
+            </span>
+            <div class="input-suffix">
+              <input
+                v-model.number="retrieval.embed_max_chars"
+                class="input mono"
+                type="number"
+                min="100"
+                max="8000"
+                step="50"
+                inputmode="numeric"
+                title="送进向量模型的正文长度，超出的尾部不参与向量（仍可被关键词搜到）"
+              />
+              <em>字</em>
+            </div>
+          </label>
+
+          <div class="rerank-sep"></div>
+
+          <label class="field rerank-toggle">
+            <span class="field-label">重排序（本地 reranker）</span>
+            <div class="toggle-row">
+              <button
+                class="seg-btn"
+                type="button"
+                :class="{ active: retrieval.rerank_enabled }"
+                @click="retrieval.rerank_enabled = !retrieval.rerank_enabled"
+              >
+                {{ retrieval.rerank_enabled ? '已启用' : '未启用' }}
+              </button>
+              <span class="cfg-hint">先召回一批候选，再用 BGE reranker 精排取最相关的前几条</span>
+            </div>
+          </label>
+
+          <template v-if="retrieval.rerank_enabled">
+            <label class="field">
+              <span class="field-label">
+                reranker 权重目录
+                <em class="field-badge">FlagEmbedding · 本地路径</em>
+              </span>
+              <input
+                v-model="retrieval.rerank_model_path"
+                class="input mono"
+                spellcheck="false"
+                placeholder="D:/models/bge-reranker-v2-m3"
+              />
+            </label>
+
+            <div class="cfg-row">
+              <label class="field">
+                <span class="field-label">
+                  精排候选数
+                  <em class="field-badge">5–100</em>
+                </span>
+                <div class="input-suffix">
+                  <input
+                    v-model.number="retrieval.rerank_top_n"
+                    class="input mono"
+                    type="number"
+                    min="5"
+                    max="100"
+                    step="5"
+                    inputmode="numeric"
+                    title="交给 reranker 打分的候选条数，越多越慢（CPU 推理）"
+                  />
+                  <em>条</em>
+                </div>
+              </label>
+              <label class="field">
+                <span class="field-label">
+                  精排后保留
+                  <em class="field-badge">1–30</em>
+                </span>
+                <div class="input-suffix">
+                  <input
+                    v-model.number="retrieval.rerank_keep"
+                    class="input mono"
+                    type="number"
+                    min="1"
+                    max="30"
+                    step="1"
+                    inputmode="numeric"
+                    title="精排后保留进 prompt 的条数，通常等于检索条数 TOP_K"
+                  />
+                  <em>条</em>
+                </div>
+              </label>
+            </div>
+          </template>
+
+          <div class="cfg-actions">
+            <button class="btn ghost sm" type="button" @click="resetRetrieval">
+              <Icon name="eraser" :size="13" />
+              <span>恢复默认</span>
+            </button>
+            <span class="cfg-hint">默认 8 条 / 相似度 0 / 笔记 1200 / 手册 900 / 无重叠 / 历史 10 条 / 嵌入 700</span>
+          </div>
+
+          <p class="field-help">
+            检索参数保存后立即对新提问生效；<b>切分参数只影响之后的索引</b>——已入库的内容要按新粒度重切，
+            需到上方「索引位置」执行一次「重建全部索引」（手册需重新解析入库）。
+            reranker 首次提问时才加载权重（CPU 上需数秒），后续常驻内存。
+          </p>
+          <p v-for="h in retrievalHints" :key="h" class="cfg-hint ret-hint">
+            <Icon name="info" :size="12" />{{ h }}
+          </p>
+        </div>
+      </section>
+
       <!-- ==================== 索引位置 ==================== -->
       <section class="card cfg-card span2">
         <header class="cfg-head">
@@ -1354,6 +1684,7 @@ const indexPct = computed(() => {
 .cfg-ic.violet { background: var(--violet-soft); color: var(--violet); }
 .cfg-ic.green { background: var(--green-soft); color: var(--green-ink); }
 .cfg-ic.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.cfg-ic.blue { background: var(--blue-soft); color: var(--blue-ink); }
 
 .cfg-body {
   padding: 14px 15px 15px;
@@ -1531,6 +1862,12 @@ select.input { padding-right: 26px; cursor: pointer; }
   color: #6a675f;
   line-height: 1.5;
 }
+/* 参数提示用 <p> 排版：需要按块换行，且长句要能自然折行 */
+p.cfg-hint { margin: 0; }
+/* reranker 配置区：与上方切分参数用一条虚线隔开 */
+.rerank-sep { margin-top: 4px; padding-top: 12px; border-top: 1px dashed var(--line-soft); }
+.rerank-toggle .toggle-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rerank-toggle .seg-btn { flex: none; }
 .test-result {
   display: inline-flex;
   align-items: center;
